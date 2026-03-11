@@ -86,9 +86,27 @@ export async function runCommand(opts: RunOptions): Promise<void> {
     await bootstrapCeoInvite({
       config: configPath,
       dbUrl: startedServer.databaseUrl,
-      baseUrl: startedServer.apiUrl.replace(/\/api$/, ""),
+      baseUrl: resolveBootstrapInviteBaseUrl(config, startedServer),
     });
   }
+}
+
+function resolveBootstrapInviteBaseUrl(
+  config: PaperclipConfig,
+  startedServer: StartedServer,
+): string {
+  const explicitBaseUrl =
+    process.env.PAPERCLIP_PUBLIC_URL ??
+    process.env.PAPERCLIP_AUTH_PUBLIC_BASE_URL ??
+    process.env.BETTER_AUTH_URL ??
+    process.env.BETTER_AUTH_BASE_URL ??
+    (config.auth.baseUrlMode === "explicit" ? config.auth.publicBaseUrl : undefined);
+
+  if (typeof explicitBaseUrl === "string" && explicitBaseUrl.trim().length > 0) {
+    return explicitBaseUrl.trim().replace(/\/+$/, "");
+  }
+
+  return startedServer.apiUrl.replace(/\/api$/, "");
 }
 
 function formatError(err: unknown): string {
