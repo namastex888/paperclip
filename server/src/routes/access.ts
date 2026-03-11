@@ -1513,12 +1513,12 @@ export function accessRoutes(
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "agent") {
       if (!req.actor.agentId) throw forbidden();
-      const allowed = await access.hasPermission(
+      const allowed = (await access.hasPermission(
         companyId,
         "agent",
         req.actor.agentId,
         permissionKey
-      );
+      )).granted;
       if (!allowed) throw forbidden("Permission denied");
       return;
     }
