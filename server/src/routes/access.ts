@@ -2293,11 +2293,20 @@ export function accessRoutes(
       if (existing.requestType === "human") {
         if (!existing.requestingUserId)
           throw conflict("Join request missing user identity");
+
+        // Extract role from invite defaults instead of hardcoding "member"
+        const defaults = invite.defaultsPayload as Record<string, unknown> | null;
+        const rolePreset = defaults?.rolePreset as string | undefined;
+        const validRoles = ["owner", "admin", "contributor", "viewer"] as const;
+        const membershipRole = rolePreset && (validRoles as readonly string[]).includes(rolePreset)
+          ? rolePreset
+          : "contributor";
+
         await access.ensureMembership(
           companyId,
           "user",
           existing.requestingUserId,
-          "member",
+          membershipRole,
           "active"
         );
         const grants = grantsFromDefaults(

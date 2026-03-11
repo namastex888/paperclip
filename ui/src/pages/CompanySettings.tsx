@@ -142,7 +142,7 @@ export function CompanySettings() {
       }));
       return accessApi.createCompanyInvite(selectedCompanyId!, {
         allowedJoinTypes: "human",
-        defaultsPayload: { rolePreset: humanInviteRole, grants: roleGrants },
+        defaultsPayload: { human: { grants: roleGrants }, rolePreset: humanInviteRole },
       });
     },
     onSuccess: (data) => {
