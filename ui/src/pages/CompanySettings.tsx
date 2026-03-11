@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Settings, Check } from "lucide-react";
 import { ROLE_PRESETS, MEMBERSHIP_ROLES, type MembershipRole } from "@paperclipai/shared";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
+import { MembersSection } from "../components/MembersSection";
 import {
   Field,
   ToggleField,
@@ -474,6 +475,9 @@ export function CompanySettings() {
           )}
         </div>
       </div>
+
+      {/* Members */}
+      <MembersSection companyId={selectedCompanyId!} />
 
       {/* Danger Zone */}
       <div className="space-y-4">
