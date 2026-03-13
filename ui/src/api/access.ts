@@ -185,4 +185,10 @@ export const accessApi = {
 
   revokeInvite: (inviteId: string) =>
     api.post<{ revoked: true }>(`/invites/${inviteId}/revoke`, {}),
+
+  getMyPermissions: (companyId: string) =>
+    api.get<{
+      membershipRole: string | null;
+      permissions: string[];
+    }>(`/companies/${companyId}/my-permissions`),
 };

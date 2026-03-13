@@ -19,6 +19,7 @@ import { Separator } from "@/components/ui/separator";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { User, Hexagon, ArrowUpRight, Tag, Plus, Trash2 } from "lucide-react";
 import { AgentIcon } from "./AgentIconPicker";
+import { useMyPermissions } from "../hooks/useMyPermissions";
 
 // TODO(issue-worktree-support): re-enable this UI once the workflow is ready to ship.
 const SHOW_EXPERIMENTAL_ISSUE_WORKTREE_UI = false;
@@ -104,6 +105,7 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
   const { selectedCompanyId } = useCompany();
   const queryClient = useQueryClient();
   const companyId = issue.companyId ?? selectedCompanyId;
+  const { can } = useMyPermissions(companyId);
   const [assigneeOpen, setAssigneeOpen] = useState(false);
   const [assigneeSearch, setAssigneeSearch] = useState("");
   const [projectOpen, setProjectOpen] = useState(false);
@@ -489,25 +491,31 @@ export function IssueProperties({ issue, onUpdate, inline }: IssuePropertiesProp
           {labelsContent}
         </PropertyPicker>
 
-        <PropertyPicker
-          inline={inline}
-          label="Assignee"
-          open={assigneeOpen}
-          onOpenChange={(open) => { setAssigneeOpen(open); if (!open) setAssigneeSearch(""); }}
-          triggerContent={assigneeTrigger}
-          popoverClassName="w-52"
-          extra={issue.assigneeAgentId ? (
-            <Link
-              to={`/agents/${issue.assigneeAgentId}`}
-              className="inline-flex items-center justify-center h-5 w-5 rounded hover:bg-accent/50 transition-colors text-muted-foreground hover:text-foreground"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <ArrowUpRight className="h-3 w-3" />
-            </Link>
-          ) : undefined}
-        >
-          {assigneeContent}
-        </PropertyPicker>
+        {can("tasks:assign") ? (
+          <PropertyPicker
+            inline={inline}
+            label="Assignee"
+            open={assigneeOpen}
+            onOpenChange={(open) => { setAssigneeOpen(open); if (!open) setAssigneeSearch(""); }}
+            triggerContent={assigneeTrigger}
+            popoverClassName="w-52"
+            extra={issue.assigneeAgentId ? (
+              <Link
+                to={`/agents/${issue.assigneeAgentId}`}
+                className="inline-flex items-center justify-center h-5 w-5 rounded hover:bg-accent/50 transition-colors text-muted-foreground hover:text-foreground"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <ArrowUpRight className="h-3 w-3" />
+              </Link>
+            ) : undefined}
+          >
+            {assigneeContent}
+          </PropertyPicker>
+        ) : (
+          <PropertyRow label="Assignee">
+            {assigneeTrigger}
+          </PropertyRow>
+        )}
 
         <PropertyPicker
           inline={inline}

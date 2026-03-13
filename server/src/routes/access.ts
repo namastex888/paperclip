@@ -2595,6 +2595,36 @@ export function accessRoutes(
     }
   );
 
+  router.get("/companies/:companyId/my-permissions", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    if (req.actor.type === "agent" && req.actor.agentId) {
+      const result = await access.getMyPermissions(companyId, "agent", req.actor.agentId);
+      res.json(result);
+      return;
+    }
+
+    if (req.actor.type === "board") {
+      if (isLocalImplicit(req)) {
+        res.json({ membershipRole: "owner", permissions: [...PERMISSION_KEYS] });
+        return;
+      }
+      if (req.actor.userId) {
+        const isAdmin = await access.isInstanceAdmin(req.actor.userId);
+        if (isAdmin) {
+          res.json({ membershipRole: "owner", permissions: [...PERMISSION_KEYS] });
+          return;
+        }
+        const result = await access.getMyPermissions(companyId, "user", req.actor.userId);
+        res.json(result);
+        return;
+      }
+    }
+
+    res.json({ membershipRole: null, permissions: [] });
+  });
+
   router.get("/companies/:companyId/members", async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCompanyPermission(req, companyId, "users:manage_permissions");

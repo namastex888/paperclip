@@ -15,6 +15,7 @@ import {
   ToggleField,
   HintIcon
 } from "../components/agent-config-primitives";
+import { useMyPermissions } from "../hooks/useMyPermissions";
 
 type AgentSnippetInput = {
   onboardingTextUrl: string;
@@ -31,6 +32,7 @@ export function CompanySettings() {
   } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
+  const { can } = useMyPermissions(selectedCompanyId);
 
   // General settings local state
   const [companyName, setCompanyName] = useState("");
@@ -336,8 +338,8 @@ export function CompanySettings() {
         </div>
       </div>
 
-      {/* Invites */}
-      <div className="space-y-4">
+      {/* Invites — visible only to users with invite permission */}
+      {can("users:invite") && (<div className="space-y-4">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           Invites
         </div>
@@ -406,10 +408,10 @@ export function CompanySettings() {
             </div>
           )}
         </div>
-      </div>
+      </div>)}
 
-      {/* Invite Collaborator */}
-      <div className="space-y-4">
+      {/* Invite Collaborator — visible only to users with invite permission */}
+      {can("users:invite") && (<div className="space-y-4">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           Invite Collaborator
         </div>
@@ -474,10 +476,12 @@ export function CompanySettings() {
             </div>
           )}
         </div>
-      </div>
+      </div>)}
 
-      {/* Members */}
-      <MembersSection companyId={selectedCompanyId!} />
+      {/* Members — visible only to users with manage_permissions */}
+      {can("users:manage_permissions") && (
+        <MembersSection companyId={selectedCompanyId!} />
+      )}
 
       {/* Danger Zone */}
       <div className="space-y-4">

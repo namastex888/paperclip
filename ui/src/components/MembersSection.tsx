@@ -1,8 +1,11 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { accessApi } from "../api/access";
+import { agentsApi } from "../api/agents";
 import { ROLE_PRESETS, MEMBERSHIP_ROLES, type MembershipRole } from "@paperclipai/shared";
+import { queryKeys } from "../lib/queryKeys";
 import { Button } from "./ui/button";
+import { Identity } from "./Identity";
 
 type Member = Awaited<ReturnType<typeof accessApi.listMembers>>[number];
 
@@ -26,6 +29,24 @@ export function MembersSection({ companyId }: { companyId: string }) {
     queryKey: ["members", companyId],
     queryFn: () => accessApi.listMembers(companyId),
   });
+
+  const { data: agents } = useQuery({
+    queryKey: queryKeys.agents.list(companyId),
+    queryFn: () => agentsApi.list(companyId),
+  });
+
+  const agentMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of agents ?? []) map.set(a.id, a.name);
+    return map;
+  }, [agents]);
+
+  function memberDisplayName(member: Member): string {
+    if (member.principalType === "agent") {
+      return agentMap.get(member.principalId) ?? member.principalId.slice(0, 8);
+    }
+    return member.principalId.slice(0, 8);
+  }
 
   const removeMutation = useMutation({
     mutationFn: (memberId: string) => accessApi.removeMember(companyId, memberId),
@@ -76,7 +97,7 @@ export function MembersSection({ companyId }: { companyId: string }) {
             >
               <div className="flex items-center gap-3">
                 <div>
-                  <div className="text-sm font-medium">{member.principalId}</div>
+                  <Identity name={memberDisplayName(member)} size="sm" />
                   <div className="text-xs text-muted-foreground">
                     {member.principalType} &middot; Joined{" "}
                     {new Date(member.createdAt).toLocaleDateString()}
@@ -139,7 +160,7 @@ export function MembersSection({ companyId }: { companyId: string }) {
           <div className="w-96 rounded-lg border border-border bg-card p-6 shadow-lg">
             <h4 className="mb-4 text-lg font-semibold">Edit Permissions</h4>
             <p className="mb-4 text-sm text-muted-foreground">
-              Editing {editingMember.principalId}
+              Editing {memberDisplayName(editingMember)}
             </p>
             <div className="mb-4">
               <label className="text-sm font-medium">Role Preset:</label>
@@ -179,7 +200,7 @@ export function MembersSection({ companyId }: { companyId: string }) {
           <div className="w-96 rounded-lg border border-border bg-card p-6 shadow-lg">
             <h4 className="mb-2 text-lg font-semibold">Remove Member</h4>
             <p className="mb-4 text-sm text-muted-foreground">
-              Remove {removingMember.principalId} from this company? This will delete their
+              Remove {memberDisplayName(removingMember)} from this company? This will delete their
               membership and all permission grants.
             </p>
             <div className="flex justify-end gap-2">
