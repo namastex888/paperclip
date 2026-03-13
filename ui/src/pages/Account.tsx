@@ -125,7 +125,7 @@ export function Account() {
   const revokeAll = useMutation({
     mutationFn: () => api.post<{ revoked: boolean }>("/users/me/sessions/revoke-all", {}),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["users", "me", "sessions"] });
+      window.location.href = "/auth";
     },
   });
 
@@ -204,8 +204,10 @@ export function Account() {
           </div>
 
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+            <label htmlFor="account-name" className="text-xs text-muted-foreground mb-1 block">Name</label>
             <input
+              id="account-name"
+              autoComplete="name"
               className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
               value={editName ?? profile?.name ?? ""}
               onChange={(e) => setEditName(e.target.value)}
@@ -213,8 +215,10 @@ export function Account() {
           </div>
 
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Email</label>
+            <label htmlFor="account-email" className="text-xs text-muted-foreground mb-1 block">Email</label>
             <input
+              id="account-email"
+              autoComplete="email"
               className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
               value={editEmail ?? profile?.email ?? ""}
               onChange={(e) => setEditEmail(e.target.value)}
@@ -243,27 +247,33 @@ export function Account() {
         </div>
         <div className="rounded-md border border-border px-4 py-4 space-y-4">
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Current password</label>
+            <label htmlFor="account-current-password" className="text-xs text-muted-foreground mb-1 block">Current password</label>
             <input
+              id="account-current-password"
               type="password"
+              autoComplete="current-password"
               className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
             />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">New password</label>
+            <label htmlFor="account-new-password" className="text-xs text-muted-foreground mb-1 block">New password</label>
             <input
+              id="account-new-password"
               type="password"
+              autoComplete="new-password"
               className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
             />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground mb-1 block">Confirm new password</label>
+            <label htmlFor="account-confirm-password" className="text-xs text-muted-foreground mb-1 block">Confirm new password</label>
             <input
+              id="account-confirm-password"
               type="password"
+              autoComplete="new-password"
               className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}

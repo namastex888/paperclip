@@ -284,7 +284,24 @@ export function userRoutes(db: Db, storageService: StorageService) {
   router.post("/users/me/sessions/revoke-all", async (req, res) => {
     const userId = assertBoardUser(req);
 
-    await db.delete(authSessions).where(eq(authSessions.userId, userId));
+    const currentSessionToken = extractSessionToken(req);
+    const currentSessionId = currentSessionToken
+      ? createHash("sha256").update(currentSessionToken).digest("hex")
+      : null;
+
+    const userSessions = await db
+      .select({ id: authSessions.id })
+      .from(authSessions)
+      .where(eq(authSessions.userId, userId));
+
+    const toRevoke = userSessions.filter(
+      (s) => s.id !== currentSessionId && !isTokenMatch(s.id, currentSessionToken),
+    );
+
+    for (const s of toRevoke) {
+      await db.delete(authSessions).where(eq(authSessions.id, s.id));
+    }
+
     res.json({ revoked: true });
   });
 
@@ -350,11 +367,25 @@ export function userRoutes(db: Db, storageService: StorageService) {
       updatedAt: new Date(),
     });
 
-    // Build reset URL
-    const forwardedProto = req.header("x-forwarded-proto");
-    const proto = forwardedProto?.split(",")[0]?.trim() || req.protocol || "http";
-    const host = req.header("x-forwarded-host")?.split(",")[0]?.trim() || req.header("host");
-    const baseUrl = host ? `${proto}://${host}` : "";
+    // Build reset URL — prefer configured public URL to prevent host header injection
+    const configuredPublicUrl =
+      process.env.PAPERCLIP_PUBLIC_URL ??
+      process.env.PAPERCLIP_AUTH_PUBLIC_BASE_URL ??
+      process.env.BETTER_AUTH_URL;
+    let baseUrl: string;
+    if (configuredPublicUrl) {
+      baseUrl = configuredPublicUrl.replace(/\/+$/, "");
+    } else {
+      const origin = req.header("origin");
+      if (origin) {
+        baseUrl = origin.replace(/\/+$/, "");
+      } else {
+        const forwardedProto = req.header("x-forwarded-proto");
+        const proto = forwardedProto?.split(",")[0]?.trim() || req.protocol || "http";
+        const host = req.header("x-forwarded-host")?.split(",")[0]?.trim() || req.header("host");
+        baseUrl = host ? `${proto}://${host}` : "";
+      }
+    }
     const resetUrl = `${baseUrl}/auth?mode=reset&token=${resetToken}`;
 
     await emailService.sendPasswordResetEmail(email, { resetUrl });

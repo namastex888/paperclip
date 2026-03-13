@@ -36,6 +36,15 @@ export interface EmailServiceConfig {
   fromAddress: string;
 }
 
+function escHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function wrapHtml(title: string, body: string): string {
   return `<!DOCTYPE html>
 <html>
@@ -74,63 +83,75 @@ function createResendEmailService(
     isConfigured: () => true,
 
     async sendInviteEmail(to, opts) {
-      const inviterLine = opts.inviterName
-        ? `<p>${opts.inviterName} has invited you to join <strong>${opts.companyName}</strong> on Paperclip.</p>`
-        : `<p>You've been invited to join <strong>${opts.companyName}</strong> on Paperclip.</p>`;
+      const safeCompany = escHtml(opts.companyName);
+      const safeInviter = opts.inviterName ? escHtml(opts.inviterName) : null;
+      const safeUrl = escHtml(opts.inviteUrl);
+      const inviterLine = safeInviter
+        ? `<p>${safeInviter} has invited you to join <strong>${safeCompany}</strong> on Paperclip.</p>`
+        : `<p>You've been invited to join <strong>${safeCompany}</strong> on Paperclip.</p>`;
       const html = wrapHtml(
-        `Join ${opts.companyName}`,
+        `Join ${safeCompany}`,
         `<h2>You're invited!</h2>
 ${inviterLine}
-<p><a href="${opts.inviteUrl}" style="display: inline-block; padding: 10px 20px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Accept Invite</a></p>
-<p style="font-size: 13px; color: #666;">Or copy this link: ${opts.inviteUrl}</p>`,
+<p><a href="${safeUrl}" style="display: inline-block; padding: 10px 20px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Accept Invite</a></p>
+<p style="font-size: 13px; color: #666;">Or copy this link: ${safeUrl}</p>`,
       );
       await send(to, `Join ${opts.companyName} on Paperclip`, html);
     },
 
     async sendApprovalEmail(to, opts) {
+      const safeCompany = escHtml(opts.companyName);
       const html = wrapHtml(
         "Access Approved",
         `<h2>You're in!</h2>
-<p>Your request to join <strong>${opts.companyName}</strong> has been approved. You can now sign in and start collaborating.</p>`,
+<p>Your request to join <strong>${safeCompany}</strong> has been approved. You can now sign in and start collaborating.</p>`,
       );
       await send(to, `Access to ${opts.companyName} approved`, html);
     },
 
     async sendAssignmentEmail(to, opts) {
-      const assignerLine = opts.assignerName
-        ? `<p>${opts.assignerName} assigned you to an issue:</p>`
+      const safeAssigner = opts.assignerName ? escHtml(opts.assignerName) : null;
+      const safeTitle = escHtml(opts.issueTitle);
+      const safeUrl = escHtml(opts.issueUrl);
+      const assignerLine = safeAssigner
+        ? `<p>${safeAssigner} assigned you to an issue:</p>`
         : `<p>You've been assigned to an issue:</p>`;
       const html = wrapHtml(
         "Issue Assigned",
         `<h2>Issue assigned to you</h2>
 ${assignerLine}
-<p><strong>${opts.issueTitle}</strong></p>
-<p><a href="${opts.issueUrl}" style="display: inline-block; padding: 10px 20px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">View Issue</a></p>`,
+<p><strong>${safeTitle}</strong></p>
+<p><a href="${safeUrl}" style="display: inline-block; padding: 10px 20px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">View Issue</a></p>`,
       );
       await send(to, `Assigned: ${opts.issueTitle}`, html);
     },
 
     async sendMentionEmail(to, opts) {
-      const mentionerLine = opts.mentionerName
-        ? `<p>${opts.mentionerName} mentioned you in a comment:</p>`
+      const safeMentioner = opts.mentionerName ? escHtml(opts.mentionerName) : null;
+      const safeTitle = escHtml(opts.issueTitle);
+      const safeUrl = escHtml(opts.issueUrl);
+      const safeSnippet = escHtml(opts.snippet);
+      const mentionerLine = safeMentioner
+        ? `<p>${safeMentioner} mentioned you in a comment:</p>`
         : `<p>You were mentioned in a comment:</p>`;
       const html = wrapHtml(
         "You were mentioned",
         `<h2>You were mentioned</h2>
 ${mentionerLine}
-<blockquote style="border-left: 3px solid #d1d5db; padding-left: 12px; color: #555; margin: 12px 0;">${opts.snippet}</blockquote>
-<p><strong>${opts.issueTitle}</strong></p>
-<p><a href="${opts.issueUrl}" style="display: inline-block; padding: 10px 20px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">View Issue</a></p>`,
+<blockquote style="border-left: 3px solid #d1d5db; padding-left: 12px; color: #555; margin: 12px 0;">${safeSnippet}</blockquote>
+<p><strong>${safeTitle}</strong></p>
+<p><a href="${safeUrl}" style="display: inline-block; padding: 10px 20px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">View Issue</a></p>`,
       );
       await send(to, `Mentioned in: ${opts.issueTitle}`, html);
     },
 
     async sendPasswordResetEmail(to, opts) {
+      const safeUrl = escHtml(opts.resetUrl);
       const html = wrapHtml(
         "Reset your password",
         `<h2>Reset your password</h2>
 <p>A password reset was requested for your Paperclip account. Click the button below to set a new password.</p>
-<p><a href="${opts.resetUrl}" style="display: inline-block; padding: 10px 20px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Reset Password</a></p>
+<p><a href="${safeUrl}" style="display: inline-block; padding: 10px 20px; background: #171717; color: #fff; text-decoration: none; border-radius: 6px;">Reset Password</a></p>
 <p style="font-size: 13px; color: #666;">If you didn't request this, you can safely ignore this email.</p>`,
       );
       await send(to, "Reset your Paperclip password", html);
