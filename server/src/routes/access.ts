@@ -36,6 +36,9 @@ import {
   unauthorized,
   badRequest
 } from "../errors.js";
+import { readRawConfigFile, writeConfigFile } from "../config-file.js";
+import { createEmailService } from "../services/email.js";
+import type { EmailService } from "../services/email.js";
 import { logger } from "../middleware/logger.js";
 import { validate } from "../middleware/validate.js";
 import {
@@ -2746,6 +2749,50 @@ export function accessRoutes(
       res.json(memberships);
     }
   );
+
+  router.patch("/admin/config/email", async (req, res) => {
+    await assertInstanceAdmin(req);
+    const { provider, resendApiKey, fromAddress } = req.body as {
+      provider?: "resend" | "none";
+      resendApiKey?: string;
+      fromAddress?: string;
+    };
+
+    const rawConfig = readRawConfigFile() ?? {};
+    const existingEmail =
+      typeof rawConfig.email === "object" && rawConfig.email !== null
+        ? { ...(rawConfig.email as Record<string, unknown>) }
+        : {};
+
+    if (provider !== undefined) existingEmail.provider = provider;
+    if (resendApiKey !== undefined) existingEmail.resendApiKey = resendApiKey;
+    if (fromAddress !== undefined) existingEmail.fromAddress = fromAddress;
+
+    rawConfig.email = existingEmail;
+    writeConfigFile(rawConfig);
+
+    // Reinitialize the email service on the running app
+    const newEmailService = createEmailService({
+      provider: (existingEmail.provider as "resend" | "none") ?? "none",
+      resendApiKey: existingEmail.resendApiKey as string | undefined,
+      fromAddress: (existingEmail.fromAddress as string) ?? "Paperclip <noreply@paperclip.dev>",
+    });
+    req.app.locals.emailService = newEmailService;
+
+    res.json({
+      provider: existingEmail.provider ?? "none",
+      fromAddress: existingEmail.fromAddress ?? "Paperclip <noreply@paperclip.dev>",
+      configured: newEmailService.isConfigured(),
+    });
+  });
+
+  router.get("/admin/config/email", async (req, res) => {
+    await assertInstanceAdmin(req);
+    const emailService = req.app.locals.emailService as EmailService | undefined;
+    res.json({
+      configured: emailService?.isConfigured() ?? false,
+    });
+  });
 
   return router;
 }

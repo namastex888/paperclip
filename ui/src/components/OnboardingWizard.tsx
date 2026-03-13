@@ -46,10 +46,12 @@ import {
   Loader2,
   FolderOpen,
   ChevronDown,
-  X
+  X,
+  Users,
+  Mail
 } from "lucide-react";
 
-type Step = 1 | 2 | 3 | 4;
+type Step = 1 | 2 | 3 | 4 | 5;
 type AdapterType =
   | "claude_local"
   | "codex_local"
@@ -107,6 +109,11 @@ export function OnboardingWizard() {
   const [taskDescription, setTaskDescription] = useState(
     DEFAULT_TASK_DESCRIPTION
   );
+
+  // Step 5 — Team & Email (optional)
+  const [teamModeEnabled, setTeamModeEnabled] = useState(false);
+  const [resendApiKey, setResendApiKey] = useState("");
+  const [resendFromAddress, setResendFromAddress] = useState("");
 
   // Auto-grow textarea for task description
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -506,9 +513,10 @@ export function OnboardingWizard() {
 
   async function handleLaunch() {
     if (!createdAgentId) return;
-    setLoading(true);
-    setError(null);
-    setLoading(false);
+    setStep(5);
+  }
+
+  function finishOnboarding() {
     reset();
     closeOnboarding();
     if (createdCompanyPrefix) {
@@ -518,6 +526,34 @@ export function OnboardingWizard() {
     navigate("/dashboard");
   }
 
+  async function handleStep5Finish() {
+    if (teamModeEnabled && resendApiKey.trim()) {
+      setLoading(true);
+      setError(null);
+      try {
+        const resp = await fetch("/api/admin/config/email", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider: "resend",
+            resendApiKey: resendApiKey.trim(),
+            fromAddress: resendFromAddress.trim() || undefined,
+          }),
+        });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          throw new Error((body as { error?: string }).error ?? "Failed to save email config");
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to save email config");
+        setLoading(false);
+        return;
+      }
+      setLoading(false);
+    }
+    finishOnboarding();
+  }
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
@@ -525,6 +561,7 @@ export function OnboardingWizard() {
       else if (step === 2 && agentName.trim()) handleStep2Next();
       else if (step === 3 && taskTitle.trim()) handleStep3Next();
       else if (step === 4) handleLaunch();
+      else if (step === 5) handleStep5Finish();
     }
   }
 
@@ -560,10 +597,10 @@ export function OnboardingWizard() {
                 <Sparkles className="h-4 w-4 text-muted-foreground" />
                 <span className="text-sm font-medium">Get Started</span>
                 <span className="text-sm text-muted-foreground/60">
-                  Step {step} of 4
+                  Step {step} of 5
                 </span>
                 <div className="flex items-center gap-1.5 ml-auto">
-                  {[1, 2, 3, 4].map((s) => (
+                  {[1, 2, 3, 4, 5].map((s) => (
                     <div
                       key={s}
                       className={cn(
@@ -1102,6 +1139,78 @@ export function OnboardingWizard() {
                 </div>
               )}
 
+              {step === 5 && (
+                <div className="space-y-5">
+                  <div className="flex items-center gap-3 mb-1">
+                    <div className="bg-muted/50 p-2">
+                      <Users className="h-5 w-5 text-muted-foreground" />
+                    </div>
+                    <div>
+                      <h3 className="font-medium">Invite your team (optional)</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Enable team mode to let other humans join this Paperclip instance.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 rounded-md border border-border px-3 py-2.5">
+                    <label className="text-sm font-medium flex-1">Enable team mode</label>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={teamModeEnabled}
+                      onClick={() => setTeamModeEnabled(!teamModeEnabled)}
+                      className={cn(
+                        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
+                        teamModeEnabled ? "bg-primary" : "bg-muted"
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-background shadow-sm ring-0 transition-transform",
+                          teamModeEnabled ? "translate-x-4" : "translate-x-0"
+                        )}
+                      />
+                    </button>
+                  </div>
+                  {teamModeEnabled && (
+                    <div className="space-y-4 border border-border rounded-md px-4 py-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Mail className="h-4 w-4 text-muted-foreground" />
+                        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                          Email Notifications (optional)
+                        </span>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Send invite and notification emails via Resend.
+                      </p>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">
+                          Resend API Key
+                        </label>
+                        <input
+                          type="password"
+                          className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+                          placeholder="re_xxxxxxxxx"
+                          value={resendApiKey}
+                          onChange={(e) => setResendApiKey(e.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">
+                          From Address
+                        </label>
+                        <input
+                          className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+                          placeholder="Paperclip <noreply@yourdomain.com>"
+                          value={resendFromAddress}
+                          onChange={(e) => setResendFromAddress(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Error */}
               {error && (
                 <div className="mt-3">
@@ -1171,13 +1280,29 @@ export function OnboardingWizard() {
                   )}
                   {step === 4 && (
                     <Button size="sm" disabled={loading} onClick={handleLaunch}>
-                      {loading ? (
-                        <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-                      ) : (
-                        <ArrowRight className="h-3.5 w-3.5 mr-1" />
-                      )}
-                      {loading ? "Opening..." : "Open Issue"}
+                      <ArrowRight className="h-3.5 w-3.5 mr-1" />
+                      Next
                     </Button>
+                  )}
+                  {step === 5 && (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={loading}
+                        onClick={finishOnboarding}
+                      >
+                        Skip
+                      </Button>
+                      <Button size="sm" disabled={loading} onClick={handleStep5Finish}>
+                        {loading ? (
+                          <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                        ) : (
+                          <Check className="h-3.5 w-3.5 mr-1" />
+                        )}
+                        {loading ? "Saving..." : "Finish"}
+                      </Button>
+                    </>
                   )}
                 </div>
               </div>

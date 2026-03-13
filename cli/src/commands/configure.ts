@@ -65,6 +65,10 @@ function defaultConfig(): PaperclipConfig {
     },
     storage: defaultStorageConfig(),
     secrets: defaultSecretsConfig(),
+    email: {
+      provider: "none",
+      fromAddress: "Paperclip <noreply@paperclip.dev>",
+    },
   };
 }
 

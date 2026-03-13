@@ -95,6 +95,12 @@ export const secretsConfigSchema = z.object({
   }),
 });
 
+export const emailConfigSchema = z.object({
+  provider: z.enum(["resend", "none"]).default("none"),
+  resendApiKey: z.string().optional(),
+  fromAddress: z.string().default("Paperclip <noreply@paperclip.dev>"),
+});
+
 export const paperclipConfigSchema = z
   .object({
     $meta: configMetaSchema,
@@ -124,6 +130,10 @@ export const paperclipConfigSchema = z
       localEncrypted: {
         keyFilePath: "~/.paperclip/instances/default/secrets/master.key",
       },
+    }),
+    email: emailConfigSchema.default({
+      provider: "none",
+      fromAddress: "Paperclip <noreply@paperclip.dev>",
     }),
   })
   .superRefine((value, ctx) => {
@@ -175,4 +185,5 @@ export type SecretsConfig = z.infer<typeof secretsConfigSchema>;
 export type SecretsLocalEncryptedConfig = z.infer<typeof secretsLocalEncryptedConfigSchema>;
 export type AuthConfig = z.infer<typeof authConfigSchema>;
 export type ConfigMeta = z.infer<typeof configMetaSchema>;
+export type EmailConfig = z.infer<typeof emailConfigSchema>;
 export type DatabaseBackupConfig = z.infer<typeof databaseBackupConfigSchema>;
