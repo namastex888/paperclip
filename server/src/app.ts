@@ -167,16 +167,18 @@ export async function createApp(
     const uiRoot = path.resolve(__dirname, "../../ui");
     const hmrPort = opts.serverPort + 10000;
     const { createServer: createViteServer } = await import("vite");
+    const proxyHostname = privateHostnameGateEnabled
+      ? Array.from(privateHostnameAllowSet).find(h => h !== "localhost" && h !== "127.0.0.1")
+      : null;
+    const hmrConfig = proxyHostname
+      ? { host: proxyHostname, port: hmrPort, clientPort: 443, protocol: "wss" as const }
+      : { host: opts.bindHost, port: hmrPort, clientPort: hmrPort };
     const vite = await createViteServer({
       root: uiRoot,
       appType: "spa",
       server: {
         middlewareMode: true,
-        hmr: {
-          host: opts.bindHost,
-          port: hmrPort,
-          clientPort: hmrPort,
-        },
+        hmr: hmrConfig,
         allowedHosts: privateHostnameGateEnabled ? Array.from(privateHostnameAllowSet) : undefined,
       },
     });
