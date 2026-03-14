@@ -50,6 +50,7 @@ const mockProjectService = vi.hoisted(() => ({
 
 const mockGoalService = vi.hoisted(() => ({
   getById: vi.fn(),
+  getDefaultCompanyGoal: vi.fn().mockResolvedValue(null),
 }));
 
 const mockIssueApprovalService = vi.hoisted(() => ({

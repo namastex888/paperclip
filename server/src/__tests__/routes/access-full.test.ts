@@ -94,7 +94,7 @@ describe("accessRoutes", () => {
     it("returns skill list", async () => {
       const res = await request(createApp()).get("/api/skills/index");
       expect(res.status).toBe(200);
-      expect(res.body.skills).toHaveLength(2);
+      expect(res.body.skills).toHaveLength(3);
     });
   });
 
