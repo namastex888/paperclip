@@ -169,11 +169,10 @@ export function MobileBottomNav({ visible }: MobileBottomNavProps) {
                 className="relative flex min-w-0 flex-col items-center justify-center gap-1 rounded-md text-[10px] font-medium text-muted-foreground hover:text-foreground transition-colors"
                 aria-label="User menu"
               >
-                <Avatar size="xs">
+                <Avatar size="sm">
                   {session.user.image && <AvatarImage src={session.user.image} alt={session.user.name || "User"} />}
-                  <AvatarFallback className="text-[8px]">{deriveInitials(session.user.name || "User")}</AvatarFallback>
+                  <AvatarFallback className="text-[9px]">{deriveInitials(session.user.name || "User")}</AvatarFallback>
                 </Avatar>
-                <span className="truncate">Me</span>
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent side="top" align="end" sideOffset={8} className="w-48">
