@@ -267,7 +267,7 @@ export async function createApp(
             ? Array.from(privateHostnameAllowSet).find(h => /^[a-z].*\.[a-z]/i.test(h))
             : null;
           return proxyHost
-            ? { host: proxyHost, port: hmrPort, clientPort: 443, path: "/__vite_hmr", protocol: "wss" as const }
+            ? { port: hmrPort, clientPort: 443, path: "/__vite_hmr", protocol: "wss" as const }
             : { host: opts.bindHost, port: hmrPort, clientPort: hmrPort };
         })(),
         allowedHosts: privateHostnameGateEnabled ? Array.from(privateHostnameAllowSet) : undefined,
