@@ -262,12 +262,14 @@ export async function createApp(
       appType: "spa",
       server: {
         middlewareMode: true,
-        hmr: {
-          host: opts.bindHost,
-          port: hmrPort,
-          clientPort: privateHostnameGateEnabled ? 443 : hmrPort,
-          ...(privateHostnameGateEnabled ? { path: "/__vite_hmr", protocol: "wss" } : {}),
-        },
+        hmr: (() => {
+          const proxyHost = privateHostnameGateEnabled
+            ? Array.from(privateHostnameAllowSet).find(h => /^[a-z].*\.[a-z]/i.test(h))
+            : null;
+          return proxyHost
+            ? { host: proxyHost, port: hmrPort, clientPort: 443, path: "/__vite_hmr", protocol: "wss" as const }
+            : { host: opts.bindHost, port: hmrPort, clientPort: hmrPort };
+        })(),
         allowedHosts: privateHostnameGateEnabled ? Array.from(privateHostnameAllowSet) : undefined,
       },
     });
