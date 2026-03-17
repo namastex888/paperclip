@@ -3,6 +3,8 @@ import { Link, useLocation, useNavigate } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { approvalsApi } from "../api/approvals";
 import { accessApi } from "../api/access";
+import { activityApi } from "../api/activity";
+import type { MentionEntry } from "../api/activity";
 import { ApiError } from "../api/client";
 import { dashboardApi } from "../api/dashboard";
 import { issuesApi } from "../api/issues";
@@ -44,11 +46,15 @@ import type { HeartbeatRun, Issue, JoinRequest } from "@paperclipai/shared";
 import {
   ACTIONABLE_APPROVAL_STATUSES,
   getLatestFailedRunsByAgent,
+  getUnreadMentions,
   getRecentTouchedIssues,
   type InboxTab,
   saveLastInboxTab,
 } from "../lib/inbox";
 import { useDismissedInboxItems } from "../hooks/useInboxBadge";
+import { cn } from "../lib/utils";
+
+type InboxJoinRequest = JoinRequest & { claimSecret?: string };
 
 type InboxCategoryFilter =
   | "everything"
@@ -56,14 +62,16 @@ type InboxCategoryFilter =
   | "join_requests"
   | "approvals"
   | "failed_runs"
-  | "alerts";
+  | "alerts"
+  | "mentions";
 type InboxApprovalFilter = "all" | "actionable" | "resolved";
 type SectionKey =
   | "issues_i_touched"
   | "join_requests"
   | "approvals"
   | "failed_runs"
-  | "alerts";
+  | "alerts"
+  | "mentions";
 
 const RUN_SOURCE_LABELS: Record<string, string> = {
   timer: "Scheduled",
@@ -243,6 +251,9 @@ export function Inbox() {
   const [allCategoryFilter, setAllCategoryFilter] = useState<InboxCategoryFilter>("everything");
   const [allApprovalFilter, setAllApprovalFilter] = useState<InboxApprovalFilter>("all");
   const { dismissed, dismiss } = useDismissedInboxItems();
+  const [approvedRequests, setApprovedRequests] = useState<Map<string, InboxJoinRequest>>(new Map());
+  const [claimedApiKey, setClaimedApiKey] = useState<string | null>(null);
+  const [keyCopied, setKeyCopied] = useState(false);
 
   const pathSegment = location.pathname.split("/").pop() ?? "recent";
   const tab: InboxTab =
@@ -261,6 +272,10 @@ export function Inbox() {
     queryFn: () => agentsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
+
+  useEffect(() => {
+    setApprovedRequests(new Map());
+  }, [selectedCompanyId]);
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Inbox" }]);
@@ -329,10 +344,21 @@ export function Inbox() {
     enabled: !!selectedCompanyId,
   });
 
+  const { data: mentionsRaw = [], isLoading: isMentionsLoading } = useQuery({
+    queryKey: queryKeys.mentions(selectedCompanyId!),
+    queryFn: () => activityApi.mentions(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+
   const touchedIssues = useMemo(() => getRecentTouchedIssues(touchedIssuesRaw), [touchedIssuesRaw]);
   const unreadTouchedIssues = useMemo(
     () => touchedIssues.filter((issue) => issue.isUnreadForMe),
     [touchedIssues],
+  );
+  const unreadMentions = useMemo(() => getUnreadMentions(mentionsRaw), [mentionsRaw]);
+  const unreadMentionIssueIds = useMemo(
+    () => Array.from(new Set(unreadMentions.map((mention) => mention.issueId))),
+    [unreadMentions],
   );
 
   const agentById = useMemo(() => {
@@ -414,8 +440,14 @@ export function Inbox() {
   const approveJoinMutation = useMutation({
     mutationFn: (joinRequest: JoinRequest) =>
       accessApi.approveJoinRequest(selectedCompanyId!, joinRequest.id),
-    onSuccess: () => {
+    onSuccess: (data, joinRequest) => {
       setActionError(null);
+      const response = data as InboxJoinRequest;
+      setApprovedRequests((prev) => {
+        const next = new Map(prev);
+        next.set(joinRequest.id, response);
+        return next;
+      });
       queryClient.invalidateQueries({ queryKey: queryKeys.access.joinRequests(selectedCompanyId!) });
       queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(selectedCompanyId!) });
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
@@ -423,6 +455,17 @@ export function Inbox() {
     },
     onError: (err) => {
       setActionError(err instanceof Error ? err.message : "Failed to approve join request");
+    },
+  });
+
+  const claimMutation = useMutation({
+    mutationFn: ({ requestId, claimSecret }: { requestId: string; claimSecret: string }) =>
+      accessApi.claimJoinRequestApiKey(requestId, claimSecret),
+    onSuccess: (data) => {
+      setClaimedApiKey(data.token);
+    },
+    onError: (err) => {
+      setActionError(err instanceof Error ? err.message : "Failed to claim API key");
     },
   });
 
@@ -445,6 +488,7 @@ export function Inbox() {
     if (!selectedCompanyId) return;
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.listTouchedByMe(selectedCompanyId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.listUnreadTouchedByMe(selectedCompanyId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.mentions(selectedCompanyId) });
     queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(selectedCompanyId) });
   };
 
@@ -492,6 +536,12 @@ export function Inbox() {
     },
   });
 
+  const allVisibleJoinRequests = useMemo<InboxJoinRequest[]>(() => {
+    const pending: InboxJoinRequest[] = joinRequests.filter((r) => !approvedRequests.has(r.id));
+    const approved = Array.from(approvedRequests.values());
+    return [...pending, ...approved];
+  }, [joinRequests, approvedRequests]);
+
   if (!selectedCompanyId) {
     return <EmptyState icon={InboxIcon} message="Select a company to view inbox." />;
   }
@@ -504,8 +554,10 @@ export function Inbox() {
     dashboard.costs.monthUtilizationPercent >= 80 &&
     !dismissed.has("alert:budget");
   const hasAlerts = showAggregateAgentError || showBudgetAlert;
-  const hasJoinRequests = joinRequests.length > 0;
+  const hasJoinRequests = joinRequests.length > 0 || approvedRequests.size > 0;
   const hasTouchedIssues = touchedIssues.length > 0;
+  const hasMentions = mentionsRaw.length > 0;
+  const hasUnreadMentions = unreadMentions.length > 0;
 
   const showJoinRequestsCategory =
     allCategoryFilter === "everything" || allCategoryFilter === "join_requests";
@@ -515,6 +567,7 @@ export function Inbox() {
   const showFailedRunsCategory =
     allCategoryFilter === "everything" || allCategoryFilter === "failed_runs";
   const showAlertsCategory = allCategoryFilter === "everything" || allCategoryFilter === "alerts";
+  const showMentionsCategory = allCategoryFilter === "everything" || allCategoryFilter === "mentions";
 
   const approvalsToRender = tab === "all" ? filteredAllApprovals : actionableApprovals;
   const showTouchedSection =
@@ -531,10 +584,17 @@ export function Inbox() {
   const showFailedRunsSection =
     tab === "all" ? showFailedRunsCategory && hasRunFailures : tab === "unread" && hasRunFailures;
   const showAlertsSection = tab === "all" ? showAlertsCategory && hasAlerts : tab === "unread" && hasAlerts;
+  const showMentionsSection =
+    tab === "all"
+      ? showMentionsCategory && hasMentions
+      : tab === "unread"
+        ? hasUnreadMentions
+        : hasMentions;
 
   const visibleSections = [
     showFailedRunsSection ? "failed_runs" : null,
     showAlertsSection ? "alerts" : null,
+    showMentionsSection ? "mentions" : null,
     showApprovalsSection ? "approvals" : null,
     showJoinRequestsSection ? "join_requests" : null,
     showTouchedSection ? "issues_i_touched" : null,
@@ -546,13 +606,18 @@ export function Inbox() {
     !isDashboardLoading &&
     !isIssuesLoading &&
     !isTouchedIssuesLoading &&
-    !isRunsLoading;
+    !isRunsLoading &&
+    !isMentionsLoading;
 
   const showSeparatorBefore = (key: SectionKey) => visibleSections.indexOf(key) > 0;
-  const unreadIssueIds = unreadTouchedIssues
-    .filter((issue) => !fadingOutIssues.has(issue.id))
-    .map((issue) => issue.id);
+  const unreadIssueIds = Array.from(new Set([
+    ...unreadTouchedIssues
+      .filter((issue) => !fadingOutIssues.has(issue.id))
+      .map((issue) => issue.id),
+    ...unreadMentionIssueIds.filter((issueId) => !fadingOutIssues.has(issueId)),
+  ]));
   const canMarkAllRead = unreadIssueIds.length > 0;
+  const mentionsToRender = tab === "unread" ? unreadMentions : mentionsRaw;
 
   return (
     <div className="space-y-6">
@@ -596,6 +661,7 @@ export function Inbox() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="everything">All categories</SelectItem>
+                <SelectItem value="mentions">Mentions</SelectItem>
                 <SelectItem value="issues_i_touched">My recent issues</SelectItem>
                 <SelectItem value="join_requests">Join requests</SelectItem>
                 <SelectItem value="approvals">Approvals</SelectItem>
@@ -643,6 +709,44 @@ export function Inbox() {
         />
       )}
 
+      {showMentionsSection && (
+        <>
+          {showSeparatorBefore("mentions") && <Separator />}
+          <div>
+            <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+              Mentions
+            </h3>
+            <div className="divide-y divide-border border border-border">
+              {mentionsToRender.map((mention: MentionEntry) => (
+                <Link
+                  key={`${mention.issueId}-${mention.mentionedAt}`}
+                  to={`/issues/${mention.identifier ?? mention.issueId}`}
+                  state={issueLinkState}
+                  className={cn(
+                    "flex min-w-0 cursor-pointer items-start gap-2 px-3 py-3 no-underline text-inherit transition-colors hover:bg-accent/50 sm:items-center sm:gap-3 sm:px-4",
+                    mention.isUnread && "font-medium bg-accent/30",
+                  )}
+                >
+                  <span className="inline-flex shrink-0 self-center"><StatusIcon status={mention.status} /></span>
+                  <span className="inline-flex shrink-0 self-center"><PriorityIcon priority={mention.priority} /></span>
+                  <span className="shrink-0 self-center text-xs font-mono text-muted-foreground">
+                    {mention.identifier ?? mention.issueId.slice(0, 8)}
+                  </span>
+                  <span className="min-w-0 flex-1 text-sm">
+                    <span className="line-clamp-2 min-w-0 sm:line-clamp-1 sm:block sm:truncate">
+                      {mention.title}
+                    </span>
+                  </span>
+                  <span className="hidden shrink-0 self-center text-xs text-muted-foreground sm:block">
+                    mentioned {timeAgo(mention.mentionedAt)}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
       {showApprovalsSection && (
         <>
           {showSeparatorBefore("approvals") && <Separator />}
@@ -679,7 +783,7 @@ export function Inbox() {
               Join Requests
             </h3>
             <div className="grid gap-3">
-              {joinRequests.map((joinRequest) => (
+              {allVisibleJoinRequests.map((joinRequest) => (
                 <div key={joinRequest.id} className="rounded-xl border border-border bg-card p-4">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                     <div className="space-y-1">
@@ -701,21 +805,42 @@ export function Inbox() {
                       )}
                     </div>
                     <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={approveJoinMutation.isPending || rejectJoinMutation.isPending}
-                        onClick={() => rejectJoinMutation.mutate(joinRequest)}
-                      >
-                        Reject
-                      </Button>
-                      <Button
-                        size="sm"
-                        disabled={approveJoinMutation.isPending || rejectJoinMutation.isPending}
-                        onClick={() => approveJoinMutation.mutate(joinRequest)}
-                      >
-                        Approve
-                      </Button>
+                      {joinRequest.status === "pending_approval" && (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={approveJoinMutation.isPending || rejectJoinMutation.isPending}
+                            onClick={() => rejectJoinMutation.mutate(joinRequest)}
+                          >
+                            Reject
+                          </Button>
+                          <Button
+                            size="sm"
+                            disabled={approveJoinMutation.isPending || rejectJoinMutation.isPending}
+                            onClick={() => approveJoinMutation.mutate(joinRequest)}
+                          >
+                            Approve
+                          </Button>
+                        </>
+                      )}
+                      {joinRequest.status === "approved" && joinRequest.claimSecret && (
+                        <Button
+                          size="sm"
+                          onClick={() =>
+                            claimMutation.mutate({
+                              requestId: joinRequest.id,
+                              claimSecret: joinRequest.claimSecret!,
+                            })
+                          }
+                          disabled={claimMutation.isPending}
+                        >
+                          {claimMutation.isPending ? "Claiming..." : "Claim API Key"}
+                        </Button>
+                      )}
+                      {joinRequest.status === "approved" && !joinRequest.claimSecret && (
+                        <StatusBadge status="approved" />
+                      )}
                     </div>
                   </div>
                 </div>
@@ -804,6 +929,37 @@ export function Inbox() {
             </div>
           </div>
         </>
+      )}
+
+      {claimedApiKey && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="rounded-lg border border-border bg-card p-6 shadow-lg w-96">
+            <h4 className="text-lg font-semibold mb-2">API Key Created</h4>
+            <p className="text-sm text-destructive mb-3 font-medium">
+              This key will NOT be shown again. Copy it now.
+            </p>
+            <textarea
+              readOnly
+              value={claimedApiKey}
+              rows={3}
+              className="w-full rounded-md border border-input bg-muted p-3 text-sm font-mono mb-3"
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => {
+                  navigator.clipboard.writeText(claimedApiKey);
+                  setKeyCopied(true);
+                  setTimeout(() => setKeyCopied(false), 2000);
+                }}
+              >
+                {keyCopied ? "Copied!" : "Copy Key"}
+              </Button>
+              <Button variant="ghost" onClick={() => setClaimedApiKey(null)}>
+                Done
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
 
       {showTouchedSection && (

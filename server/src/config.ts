@@ -70,6 +70,9 @@ export interface Config {
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
   companyDeletionEnabled: boolean;
+  emailProvider: "resend" | "none";
+  emailResendApiKey: string | undefined;
+  emailFromAddress: string;
 }
 
 export function loadConfig(): Config {
@@ -210,6 +213,13 @@ export function loadConfig(): Config {
       resolveDefaultBackupDir(),
   );
 
+  const fileEmail = fileConfig?.email;
+  const emailResendApiKey = process.env.RESEND_API_KEY ?? fileEmail?.resendApiKey ?? undefined;
+  const emailProviderRaw = emailResendApiKey ? "resend" : (fileEmail?.provider ?? "none");
+  const emailProvider: "resend" | "none" = emailProviderRaw === "resend" ? "resend" : "none";
+  const emailFromAddress =
+    process.env.RESEND_EMAIL_FROM_ADDRESS ?? fileEmail?.fromAddress ?? "Paperclip <noreply@paperclip.dev>";
+
   return {
     deploymentMode,
     deploymentExposure,
@@ -252,5 +262,8 @@ export function loadConfig(): Config {
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
     companyDeletionEnabled,
+    emailProvider,
+    emailResendApiKey,
+    emailFromAddress,
   };
 }

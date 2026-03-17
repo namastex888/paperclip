@@ -84,5 +84,27 @@ export function activityRoutes(db: Db) {
     res.json(result);
   });
 
+  // GET /companies/:companyId/mentions?userId=me — issues where user was @mentioned
+  router.get("/companies/:companyId/mentions", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    let userId = req.query.userId as string | undefined;
+    if (userId === "me") {
+      if (req.actor.type !== "board" || !req.actor.userId) {
+        res.status(403).json({ error: "userId=me requires board authentication" });
+        return;
+      }
+      userId = req.actor.userId;
+    }
+    if (!userId) {
+      res.status(400).json({ error: "userId query parameter is required" });
+      return;
+    }
+
+    const mentionActivities = await issueSvc.listMentions(companyId, userId);
+    res.json(mentionActivities);
+  });
+
   return router;
 }

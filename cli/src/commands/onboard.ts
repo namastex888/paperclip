@@ -419,6 +419,10 @@ export async function onboard(opts: OnboardOptions): Promise<void> {
     auth,
     storage,
     secrets,
+    email: {
+      provider: "none",
+      fromAddress: "Paperclip <noreply@paperclip.dev>",
+    },
   };
 
   const keyResult = ensureLocalSecretsKeyFile(config, configPath);

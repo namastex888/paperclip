@@ -16,6 +16,7 @@ export type BetterAuthSessionUser = {
   id: string;
   email?: string | null;
   name?: string | null;
+  image?: string | null;
 };
 
 export type BetterAuthSessionResult = {
@@ -122,7 +123,7 @@ export async function resolveBetterAuthSessionFromHeaders(
 
   const value = sessionValue as {
     session?: { id?: string; userId?: string } | null;
-    user?: { id?: string; email?: string | null; name?: string | null } | null;
+    user?: { id?: string; email?: string | null; name?: string | null; image?: string | null } | null;
   };
   const session = value.session?.id && value.session.userId
     ? { id: value.session.id, userId: value.session.userId }
@@ -132,6 +133,7 @@ export async function resolveBetterAuthSessionFromHeaders(
         id: value.user.id,
         email: value.user.email ?? null,
         name: value.user.name ?? null,
+        image: value.user.image ?? null,
       }
     : null;
 

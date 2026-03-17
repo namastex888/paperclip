@@ -1,6 +1,8 @@
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
+import { eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { authUsers } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
   createIssueAttachmentMetadataSchema,
@@ -26,6 +28,7 @@ import {
   projectService,
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
+import type { EmailService } from "../services/email.js";
 import { forbidden, HttpError, unauthorized } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
@@ -47,6 +50,27 @@ export function issueRoutes(db: Db, storage: StorageService) {
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 },
   });
+
+  async function resolveUserNames(userIds: (string | null | undefined)[]): Promise<Map<string, string>> {
+    const unique = [...new Set(userIds.filter((id): id is string => typeof id === "string" && id.length > 0))];
+    if (unique.length === 0) return new Map();
+    const rows = await db
+      .select({ id: authUsers.id, name: authUsers.name })
+      .from(authUsers)
+      .where(inArray(authUsers.id, unique));
+    return new Map(rows.map((r) => [r.id, r.name]));
+  }
+
+  function enrichIssueWithUserNames<T extends { createdByUserId?: string | null; assigneeUserId?: string | null }>(
+    issue: T,
+    userMap: Map<string, string>,
+  ) {
+    return {
+      ...issue,
+      createdByUserName: issue.createdByUserId ? userMap.get(issue.createdByUserId) ?? null : null,
+      assigneeUserName: issue.assigneeUserId ? userMap.get(issue.assigneeUserId) ?? null : null,
+    };
+  }
 
   function withContentPath<T extends { id: string }>(attachment: T) {
     return {
@@ -87,18 +111,48 @@ export function issueRoutes(db: Db, storage: StorageService) {
     return Boolean((agent.permissions as Record<string, unknown>).canCreateAgents);
   }
 
-  async function assertCanAssignTasks(req: Request, companyId: string) {
+  async function assertCanAssignTasks(req: Request, companyId: string, targetAgentId?: string | null) {
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "board") {
       if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
       const allowed = await access.canUser(companyId, req.actor.userId, "tasks:assign");
       if (!allowed) throw forbidden("Missing permission: tasks:assign");
+      // Check subtree scope for board users
+      if (targetAgentId) {
+        const scopeResult = await access.hasPermission(companyId, "user", req.actor.userId!, "tasks:assign_scope");
+        if (scopeResult.granted && scopeResult.scope) {
+          const subtree = typeof scopeResult.scope === "object" && scopeResult.scope.subtree
+            ? String(scopeResult.scope.subtree)
+            : null;
+          if (subtree) {
+            const chain = await agentsSvc.getChainOfCommand(targetAgentId);
+            const isInSubtree = chain.some(a => a.id === subtree) || targetAgentId === subtree;
+            if (!isInSubtree) throw forbidden("Cannot assign to agent outside your scope subtree");
+          }
+        }
+      }
       return;
     }
     if (req.actor.type === "agent") {
       if (!req.actor.agentId) throw forbidden("Agent authentication required");
-      const allowedByGrant = await access.hasPermission(companyId, "agent", req.actor.agentId, "tasks:assign");
-      if (allowedByGrant) return;
+      const allowedByGrant = (await access.hasPermission(companyId, "agent", req.actor.agentId, "tasks:assign")).granted;
+      if (allowedByGrant) {
+        // Check subtree scope for agents
+        if (targetAgentId) {
+          const scopeResult = await access.hasPermission(companyId, "agent", req.actor.agentId, "tasks:assign_scope");
+          if (scopeResult.granted && scopeResult.scope) {
+            const subtree = typeof scopeResult.scope === "object" && scopeResult.scope.subtree
+              ? String(scopeResult.scope.subtree)
+              : null;
+            if (subtree) {
+              const chain = await agentsSvc.getChainOfCommand(targetAgentId);
+              const isInSubtree = chain.some(a => a.id === subtree) || targetAgentId === subtree;
+              if (!isInSubtree) throw forbidden("Cannot assign to agent outside your scope subtree");
+            }
+          }
+        }
+        return;
+      }
       const actorAgent = await agentsSvc.getById(req.actor.agentId);
       if (actorAgent && actorAgent.companyId === companyId && canCreateAgentsLegacy(actorAgent)) return;
       throw forbidden("Missing permission: tasks:assign");
@@ -232,7 +286,10 @@ export function issueRoutes(db: Db, storage: StorageService) {
       labelId: req.query.labelId as string | undefined,
       q: req.query.q as string | undefined,
     });
-    res.json(result);
+    const userMap = await resolveUserNames(
+      result.flatMap((i) => [i.createdByUserId, i.assigneeUserId]),
+    );
+    res.json(result.map((i) => enrichIssueWithUserNames(i, userMap)));
   });
 
   router.get("/companies/:companyId/labels", async (req, res) => {
@@ -311,8 +368,9 @@ export function issueRoutes(db: Db, storage: StorageService) {
     const mentionedProjects = mentionedProjectIds.length > 0
       ? await projectsSvc.listByIds(issue.companyId, mentionedProjectIds)
       : [];
+    const userMap = await resolveUserNames([issue.createdByUserId, issue.assigneeUserId]);
     res.json({
-      ...issue,
+      ...enrichIssueWithUserNames(issue, userMap),
       goalId: goal?.id ?? issue.goalId,
       ancestors,
       ...documentPayload,
@@ -642,7 +700,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     if (req.body.assigneeAgentId || req.body.assigneeUserId) {
-      await assertCanAssignTasks(req, companyId);
+      await assertCanAssignTasks(req, companyId, req.body.assigneeAgentId);
     }
 
     const actor = getActorInfo(req);
@@ -664,21 +722,45 @@ export function issueRoutes(db: Db, storage: StorageService) {
       details: { title: issue.title, identifier: issue.identifier },
     });
 
+    const wakeups = new Map<string, Parameters<typeof heartbeat.wakeup>[1]>();
+
     if (issue.assigneeAgentId && issue.status !== "backlog") {
-      void heartbeat
-        .wakeup(issue.assigneeAgentId, {
-          source: "assignment",
-          triggerDetail: "system",
-          reason: "issue_assigned",
-          payload: { issueId: issue.id, mutation: "create" },
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-          contextSnapshot: { issueId: issue.id, source: "issue.create" },
-        })
-        .catch((err) => logger.warn({ err, issueId: issue.id }, "failed to wake assignee on issue create"));
+      wakeups.set(issue.assigneeAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: { issueId: issue.id, mutation: "create" },
+        requestedByActorType: actor.actorType,
+        requestedByActorId: actor.actorId,
+        contextSnapshot: { issueId: issue.id, source: "issue.create" },
+      });
+    }
+
+    if (issue.description?.trim()) {
+      await svc.processMentionNotifications({
+        companyId: issue.companyId,
+        issueId: issue.id,
+        issueTitle: issue.title,
+        issueIdentifier: issue.identifier,
+        body: issue.description,
+        baseUrl: `${req.protocol}://${req.get("host")}`,
+        actor,
+        emailService: req.app.locals.emailService as EmailService | undefined,
+        wakeups,
+        contextSource: "issue.create.mention",
+      });
     }
 
     res.status(201).json(issue);
+
+    // Fire-and-forget: only heartbeat wakeups
+    void (async () => {
+      for (const [agentId, wakeup] of wakeups.entries()) {
+        heartbeat
+          .wakeup(agentId, wakeup)
+          .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on issue create"));
+      }
+    })().catch((err) => logger.warn({ err, issueId: issue.id }, "heartbeat wakeup loop failed on issue create"));
   });
 
   router.patch("/issues/:id", validate(updateIssueSchema), async (req, res) => {
@@ -704,7 +786,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
 
     if (assigneeWillChange) {
       if (!isAgentReturningIssueToCreator) {
-        await assertCanAssignTasks(req, existing.companyId);
+        await assertCanAssignTasks(req, existing.companyId, req.body.assigneeAgentId);
       }
     }
     if (!(await assertAgentRunCheckoutOwnership(req, res, existing))) return;
@@ -834,33 +916,18 @@ export function issueRoutes(db: Db, storage: StorageService) {
       }
 
       if (commentBody && comment) {
-        let mentionedIds: string[] = [];
-        try {
-          mentionedIds = await svc.findMentionedAgents(issue.companyId, commentBody);
-        } catch (err) {
-          logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
-        }
-
-        for (const mentionedId of mentionedIds) {
-          if (wakeups.has(mentionedId)) continue;
-          if (actor.actorType === "agent" && actor.actorId === mentionedId) continue;
-          wakeups.set(mentionedId, {
-            source: "automation",
-            triggerDetail: "system",
-            reason: "issue_comment_mentioned",
-            payload: { issueId: id, commentId: comment.id },
-            requestedByActorType: actor.actorType,
-            requestedByActorId: actor.actorId,
-            contextSnapshot: {
-              issueId: id,
-              taskId: id,
-              commentId: comment.id,
-              wakeCommentId: comment.id,
-              wakeReason: "issue_comment_mentioned",
-              source: "comment.mention",
-            },
-          });
-        }
+        await svc.processMentionNotifications({
+          companyId: issue.companyId,
+          issueId: issue.id,
+          issueTitle: issue.title,
+          issueIdentifier: issue.identifier,
+          commentId: comment.id,
+          body: commentBody,
+          baseUrl: `${req.protocol}://${req.get("host")}`,
+          actor,
+          emailService: req.app.locals.emailService as EmailService | undefined,
+          wakeups,
+        });
       }
 
       for (const [agentId, wakeup] of wakeups.entries()) {
@@ -869,6 +936,31 @@ export function issueRoutes(db: Db, storage: StorageService) {
           .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on issue update"));
       }
     })();
+
+    // Send assignment email when assigned to a human user
+    if (assigneeChanged && issue.assigneeUserId) {
+      const emailSvc = req.app.locals.emailService as EmailService | undefined;
+      if (emailSvc?.isConfigured()) {
+        void (async () => {
+          try {
+            const userRows = await db
+              .select({ email: authUsers.email })
+              .from(authUsers)
+              .where(eq(authUsers.id, issue.assigneeUserId!));
+            const user = userRows[0];
+            if (!user?.email) return;
+            const baseUrl = `${req.protocol}://${req.get("host")}`;
+            const issueUrl = `${baseUrl}/issues/${issue.identifier ?? issue.id}`;
+            await emailSvc.sendAssignmentEmail(user.email, {
+              issueTitle: issue.title,
+              issueUrl,
+            });
+          } catch (err) {
+            logger.warn({ err, issueId: issue.id }, "failed to send assignment email");
+          }
+        })();
+      }
+    }
 
     res.json({ ...issue, comment });
   });
@@ -1048,7 +1140,13 @@ export function issueRoutes(db: Db, storage: StorageService) {
       order,
       limit,
     });
-    res.json(comments);
+    const commentUserMap = await resolveUserNames(comments.map((c) => c.authorUserId));
+    res.json(
+      comments.map((c) => ({
+        ...c,
+        authorUserName: c.authorUserId ? commentUserMap.get(c.authorUserId) ?? null : null,
+      })),
+    );
   });
 
   router.get("/issues/:id/comments/:commentId", async (req, res) => {
@@ -1065,7 +1163,11 @@ export function issueRoutes(db: Db, storage: StorageService) {
       res.status(404).json({ error: "Comment not found" });
       return;
     }
-    res.json(comment);
+    const commentUserMap = await resolveUserNames([comment.authorUserId]);
+    res.json({
+      ...comment,
+      authorUserName: comment.authorUserId ? commentUserMap.get(comment.authorUserId) ?? null : null,
+    });
   });
 
   router.post("/issues/:id/comments", validate(addIssueCommentSchema), async (req, res) => {
@@ -1243,33 +1345,18 @@ export function issueRoutes(db: Db, storage: StorageService) {
         }
       }
 
-      let mentionedIds: string[] = [];
-      try {
-        mentionedIds = await svc.findMentionedAgents(issue.companyId, req.body.body);
-      } catch (err) {
-        logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
-      }
-
-      for (const mentionedId of mentionedIds) {
-        if (wakeups.has(mentionedId)) continue;
-        if (actorIsAgent && actor.actorId === mentionedId) continue;
-        wakeups.set(mentionedId, {
-          source: "automation",
-          triggerDetail: "system",
-          reason: "issue_comment_mentioned",
-          payload: { issueId: id, commentId: comment.id },
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-          contextSnapshot: {
-            issueId: id,
-            taskId: id,
-            commentId: comment.id,
-            wakeCommentId: comment.id,
-            wakeReason: "issue_comment_mentioned",
-            source: "comment.mention",
-          },
-        });
-      }
+      await svc.processMentionNotifications({
+        companyId: currentIssue.companyId,
+        issueId: currentIssue.id,
+        issueTitle: currentIssue.title,
+        issueIdentifier: currentIssue.identifier,
+        commentId: comment.id,
+        body: req.body.body,
+        baseUrl: `${req.protocol}://${req.get("host")}`,
+        actor,
+        emailService: req.app.locals.emailService as EmailService | undefined,
+        wakeups,
+      });
 
       for (const [agentId, wakeup] of wakeups.entries()) {
         heartbeat

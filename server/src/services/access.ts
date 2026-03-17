@@ -1,11 +1,14 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  authUsers,
   companyMemberships,
   instanceUserRoles,
   principalPermissionGrants,
 } from "@paperclipai/db";
-import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
+import type { MembershipRole, PermissionKey, PrincipalType } from "@paperclipai/shared";
+import { ROLE_HIERARCHY, PERMISSION_KEYS } from "@paperclipai/shared";
+import { logActivity } from "./activity-log.js";
 
 type MembershipRow = typeof companyMemberships.$inferSelect;
 type GrantInput = {
@@ -47,11 +50,11 @@ export function accessService(db: Db) {
     principalType: PrincipalType,
     principalId: string,
     permissionKey: PermissionKey,
-  ): Promise<boolean> {
+  ): Promise<{ granted: boolean; scope: Record<string, unknown> | null }> {
     const membership = await getMembership(companyId, principalType, principalId);
-    if (!membership || membership.status !== "active") return false;
+    if (!membership || membership.status !== "active") return { granted: false, scope: null };
     const grant = await db
-      .select({ id: principalPermissionGrants.id })
+      .select({ id: principalPermissionGrants.id, scope: principalPermissionGrants.scope })
       .from(principalPermissionGrants)
       .where(
         and(
@@ -62,7 +65,8 @@ export function accessService(db: Db) {
         ),
       )
       .then((rows) => rows[0] ?? null);
-    return Boolean(grant);
+    if (!grant) return { granted: false, scope: null };
+    return { granted: true, scope: grant.scope as Record<string, unknown> | null };
   }
 
   async function canUser(
@@ -72,7 +76,7 @@ export function accessService(db: Db) {
   ): Promise<boolean> {
     if (!userId) return false;
     if (await isInstanceAdmin(userId)) return true;
-    return hasPermission(companyId, "user", userId, permissionKey);
+    return hasPermission(companyId, "user", userId, permissionKey).then((r) => r.granted);
   }
 
   async function listMembers(companyId: string) {
@@ -83,11 +87,20 @@ export function accessService(db: Db) {
       .orderBy(sql`${companyMemberships.createdAt} desc`);
   }
 
+  function canModifyMember(actorRole: string | null, targetRole: string | null): boolean {
+    if (!actorRole || !targetRole) return false;
+    const actorOrdinal = ROLE_HIERARCHY[actorRole as MembershipRole];
+    const targetOrdinal = ROLE_HIERARCHY[targetRole as MembershipRole];
+    if (actorOrdinal === undefined || targetOrdinal === undefined) return false;
+    return actorOrdinal < targetOrdinal;
+  }
+
   async function setMemberPermissions(
     companyId: string,
     memberId: string,
     grants: GrantInput[],
     grantedByUserId: string | null,
+    membershipRole?: MembershipRole,
   ) {
     const member = await db
       .select()
@@ -96,7 +109,16 @@ export function accessService(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (!member) return null;
 
+    let updatedMember = member;
     await db.transaction(async (tx) => {
+      if (membershipRole !== undefined) {
+        const [row] = await tx
+          .update(companyMemberships)
+          .set({ membershipRole, updatedAt: new Date() })
+          .where(eq(companyMemberships.id, memberId))
+          .returning();
+        if (row) updatedMember = row;
+      }
       await tx
         .delete(principalPermissionGrants)
         .where(
@@ -122,7 +144,17 @@ export function accessService(db: Db) {
       }
     });
 
-    return member;
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: grantedByUserId ?? "system",
+      action: "permissions.updated",
+      entityType: "membership",
+      entityId: memberId,
+      details: { grants: grants.map((g) => g.permissionKey), ...(membershipRole !== undefined ? { membershipRole } : {}) },
+    });
+
+    return updatedMember;
   }
 
   async function promoteInstanceAdmin(userId: string) {
@@ -176,7 +208,7 @@ export function accessService(db: Db) {
           principalType: "user",
           principalId: userId,
           status: "active",
-          membershipRole: "member",
+          membershipRole: "contributor",
         });
       }
     });
@@ -188,8 +220,8 @@ export function accessService(db: Db) {
     companyId: string,
     principalType: PrincipalType,
     principalId: string,
-    membershipRole: string | null = "member",
-    status: "pending" | "active" | "suspended" = "active",
+    membershipRole: string | null = "contributor",
+    status: "active" | "suspended" = "active",
   ) {
     const existing = await getMembership(companyId, principalType, principalId);
     if (existing) {
@@ -249,6 +281,135 @@ export function accessService(db: Db) {
         })),
       );
     });
+    await logActivity(db, {
+      companyId,
+      actorType: "system",
+      actorId: grantedByUserId ?? "system",
+      action: "permissions.updated",
+      entityType: "principal",
+      entityId: principalId,
+      details: { principalType, grants: grants.map((g) => g.permissionKey) },
+    });
+  }
+
+  async function removeMember(companyId: string, memberId: string, actorUserId: string) {
+    const member = await db
+      .select()
+      .from(companyMemberships)
+      .where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.id, memberId)))
+      .then((rows) => rows[0] ?? null);
+    if (!member) return null;
+    await db.transaction(async (tx) => {
+      await tx.delete(principalPermissionGrants).where(
+        and(
+          eq(principalPermissionGrants.companyId, companyId),
+          eq(principalPermissionGrants.principalType, member.principalType),
+          eq(principalPermissionGrants.principalId, member.principalId),
+        ),
+      );
+      await tx.delete(companyMemberships).where(eq(companyMemberships.id, memberId));
+    });
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: actorUserId,
+      action: "member.removed",
+      entityType: "membership",
+      entityId: memberId,
+      details: { principalType: member.principalType, principalId: member.principalId },
+    });
+    return member;
+  }
+
+  async function suspendMember(companyId: string, memberId: string, actorUserId: string) {
+    const updated = await db
+      .update(companyMemberships)
+      .set({ status: "suspended", updatedAt: new Date() })
+      .where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.id, memberId)))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!updated) return null;
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: actorUserId,
+      action: "member.suspended",
+      entityType: "membership",
+      entityId: memberId,
+    });
+    return updated;
+  }
+
+  async function unsuspendMember(companyId: string, memberId: string, actorUserId: string) {
+    const updated = await db
+      .update(companyMemberships)
+      .set({ status: "active", updatedAt: new Date() })
+      .where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.id, memberId)))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!updated) return null;
+    await logActivity(db, {
+      companyId,
+      actorType: "user",
+      actorId: actorUserId,
+      action: "member.unsuspended",
+      entityType: "membership",
+      entityId: memberId,
+    });
+    return updated;
+  }
+
+  async function listPeople(companyId: string) {
+    const rows = await db
+      .select({
+        id: authUsers.id,
+        name: authUsers.name,
+        email: authUsers.email,
+        avatar: authUsers.image,
+        membershipRole: companyMemberships.membershipRole,
+        status: companyMemberships.status,
+      })
+      .from(companyMemberships)
+      .leftJoin(authUsers, eq(companyMemberships.principalId, authUsers.id))
+      .where(
+        and(
+          eq(companyMemberships.companyId, companyId),
+          eq(companyMemberships.principalType, "user"),
+        ),
+      )
+      .orderBy(sql`${authUsers.name} asc nulls last`);
+    return rows.filter((r) => r.id !== null);
+  }
+
+  async function getMyPermissions(
+    companyId: string,
+    principalType: PrincipalType,
+    principalId: string,
+  ): Promise<{ membershipRole: MembershipRole | null; permissions: PermissionKey[] }> {
+    const membership = await getMembership(companyId, principalType, principalId);
+    if (!membership || membership.status !== "active") {
+      return { membershipRole: null, permissions: [] };
+    }
+
+    const grants = await db
+      .select({ permissionKey: principalPermissionGrants.permissionKey })
+      .from(principalPermissionGrants)
+      .where(
+        and(
+          eq(principalPermissionGrants.companyId, companyId),
+          eq(principalPermissionGrants.principalType, principalType),
+          eq(principalPermissionGrants.principalId, principalId),
+        ),
+      );
+
+    const permissions = grants
+      .map((g) => g.permissionKey)
+      .filter((k): k is PermissionKey => PERMISSION_KEYS.includes(k as PermissionKey));
+
+    return {
+      membershipRole: (membership.membershipRole as MembershipRole) ?? null,
+      permissions,
+    };
   }
 
   return {
@@ -258,11 +419,17 @@ export function accessService(db: Db) {
     getMembership,
     ensureMembership,
     listMembers,
+    listPeople,
+    canModifyMember,
     setMemberPermissions,
     promoteInstanceAdmin,
     demoteInstanceAdmin,
     listUserCompanyAccess,
     setUserCompanyAccess,
     setPrincipalGrants,
+    removeMember,
+    suspendMember,
+    unsuspendMember,
+    getMyPermissions,
   };
 }

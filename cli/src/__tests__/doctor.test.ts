@@ -65,6 +65,10 @@ function createTempConfig(): string {
         keyFilePath: path.join(runtimeRoot, "secrets", "master.key"),
       },
     },
+    email: {
+      provider: "none",
+      fromAddress: "Paperclip <noreply@paperclip.dev>",
+    },
   };
 
   writeConfig(config, configPath);

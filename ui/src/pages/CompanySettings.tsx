@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useState } from "react";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -7,8 +7,11 @@ import { accessApi } from "../api/access";
 import { assetsApi } from "../api/assets";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
-import { Settings, Check } from "lucide-react";
+import { Settings, Check, Upload } from "lucide-react";
+import { ROLE_PRESETS, MEMBERSHIP_ROLES, type MembershipRole } from "@paperclipai/shared";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
+import { AvatarCropDialog } from "../components/AvatarCropDialog";
+import { MembersSection } from "../components/MembersSection";
 import {
   Field,
   ToggleField,
@@ -38,6 +41,10 @@ export function CompanySettings() {
   const [logoUrl, setLogoUrl] = useState("");
   const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
 
+  // Logo upload
+  const logoInputRef = useRef<HTMLInputElement>(null);
+  const [logoCropFile, setLogoCropFile] = useState<File | null>(null);
+
   // Sync local state from selected company
   useEffect(() => {
     if (!selectedCompany) return;
@@ -51,6 +58,16 @@ export function CompanySettings() {
   const [inviteSnippet, setInviteSnippet] = useState<string | null>(null);
   const [snippetCopied, setSnippetCopied] = useState(false);
   const [snippetCopyDelightId, setSnippetCopyDelightId] = useState(0);
+
+  const [humanInviteUrl, setHumanInviteUrl] = useState<string | null>(null);
+  const [humanInviteId, setHumanInviteId] = useState<string | null>(null);
+  const [humanInviteToken, setHumanInviteToken] = useState<string | null>(null);
+  const [humanInviteError, setHumanInviteError] = useState<string | null>(null);
+  const [humanInviteRole, setHumanInviteRole] = useState<MembershipRole>("contributor");
+  const [humanInviteCopied, setHumanInviteCopied] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteEmailSent, setInviteEmailSent] = useState(false);
+  const [inviteEmailError, setInviteEmailError] = useState<string | null>(null);
 
   const generalDirty =
     !!selectedCompany &&
@@ -67,6 +84,13 @@ export function CompanySettings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
     }
+  });
+
+  const logoMutation = useMutation({
+    mutationFn: (file: File) => companiesApi.uploadLogo(selectedCompanyId!, file),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+    },
   });
 
   const settingsMutation = useMutation({
@@ -168,11 +192,61 @@ export function CompanySettings() {
     clearLogoMutation.mutate();
   }
 
+  const humanInviteMutation = useMutation({
+    mutationFn: async () => {
+      const roleGrants = ROLE_PRESETS[humanInviteRole].map((k) => ({
+        permissionKey: k,
+      }));
+      return accessApi.createCompanyInvite(selectedCompanyId!, {
+        allowedJoinTypes: "human",
+        defaultsPayload: { human: { grants: roleGrants }, rolePreset: humanInviteRole },
+      });
+    },
+    onSuccess: (data) => {
+      setHumanInviteUrl(data.inviteUrl);
+      setHumanInviteId(data.id);
+      setHumanInviteToken(data.token);
+      setHumanInviteError(null);
+      setInviteEmail("");
+      setInviteEmailSent(false);
+      setInviteEmailError(null);
+    },
+    onError: (err: Error) => {
+      setHumanInviteError(err.message);
+    },
+  });
+
+  const sendInviteEmailMutation = useMutation({
+    mutationFn: async () => {
+      if (!humanInviteId || !humanInviteToken) throw new Error("No invite to send");
+      return accessApi.sendInviteEmail(selectedCompanyId!, humanInviteId, {
+        email: inviteEmail.trim(),
+        token: humanInviteToken,
+      });
+    },
+    onSuccess: () => {
+      setInviteEmailSent(true);
+      setInviteEmailError(null);
+      setTimeout(() => setInviteEmailSent(false), 3000);
+    },
+    onError: (err: Error) => {
+      setInviteEmailError(err.message);
+    },
+  });
+
   useEffect(() => {
     setInviteError(null);
     setInviteSnippet(null);
     setSnippetCopied(false);
     setSnippetCopyDelightId(0);
+    setHumanInviteUrl(null);
+    setHumanInviteId(null);
+    setHumanInviteToken(null);
+    setHumanInviteError(null);
+    setHumanInviteCopied(false);
+    setInviteEmail("");
+    setInviteEmailSent(false);
+    setInviteEmailError(null);
   }, [selectedCompanyId]);
   const archiveMutation = useMutation({
     mutationFn: ({
@@ -266,6 +340,7 @@ export function CompanySettings() {
                 companyName={companyName || selectedCompany.name}
                 logoUrl={logoUrl || null}
                 brandColor={brandColor || null}
+                imageUrl={selectedCompany.image}
                 className="rounded-[14px]"
               />
             </div>
@@ -348,6 +423,57 @@ export function CompanySettings() {
               </Field>
             </div>
           </div>
+
+          {/* Logo upload */}
+          <Field
+            label="Company Logo"
+            hint="Upload a logo image (PNG, JPG, or WebP, max 2MB). Replaces the pattern icon."
+          >
+            <div className="flex items-center gap-3">
+              <input
+                ref={logoInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) setLogoCropFile(file);
+                  e.target.value = "";
+                }}
+              />
+              <AvatarCropDialog
+                file={logoCropFile}
+                onConfirm={(blob) => {
+                  const file = new File([blob], "logo.png", { type: "image/png" });
+                  logoMutation.mutate(file);
+                  setLogoCropFile(null);
+                }}
+                onCancel={() => setLogoCropFile(null)}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => logoInputRef.current?.click()}
+                disabled={logoMutation.isPending}
+              >
+                <Upload className="h-4 w-4 mr-1.5" />
+                {logoMutation.isPending ? "Uploading..." : "Change Logo"}
+              </Button>
+              {logoMutation.isSuccess && (
+                <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <Check className="h-3 w-3" />
+                  Logo updated
+                </span>
+              )}
+              {logoMutation.isError && (
+                <span className="text-xs text-destructive">
+                  {logoMutation.error instanceof Error
+                    ? logoMutation.error.message
+                    : "Failed to upload logo"}
+                </span>
+              )}
+            </div>
+          </Field>
         </div>
       </div>
 
@@ -460,6 +586,114 @@ export function CompanySettings() {
           )}
         </div>
       </div>
+
+      {/* Invite Collaborator */}
+      <div className="space-y-4">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Invite Collaborator
+        </div>
+        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+          <p className="text-sm text-muted-foreground">
+            Generate a single-use invite link for a human collaborator. Links expire after 24 hours.
+          </p>
+
+          <div className="flex items-center gap-3">
+            <label className="text-sm font-medium">Role:</label>
+            <select
+              value={humanInviteRole}
+              onChange={(e) => setHumanInviteRole(e.target.value as MembershipRole)}
+              className="rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+            >
+              {MEMBERSHIP_ROLES.map((role) => (
+                <option key={role} value={role}>
+                  {role.charAt(0).toUpperCase() + role.slice(1)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              onClick={() => humanInviteMutation.mutate()}
+              disabled={humanInviteMutation.isPending}
+            >
+              {humanInviteMutation.isPending ? "Generating..." : "Generate Invite Link"}
+            </Button>
+          </div>
+
+          {humanInviteError && (
+            <p className="text-sm text-destructive">{humanInviteError}</p>
+          )}
+
+          {humanInviteUrl && (
+            <div className="rounded-md border border-border bg-muted/30 p-2 space-y-3">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Invite URL</label>
+                <textarea
+                  readOnly
+                  value={humanInviteUrl}
+                  rows={2}
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs outline-none"
+                />
+                <div className="mt-2 flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      navigator.clipboard.writeText(humanInviteUrl);
+                      setHumanInviteCopied(true);
+                      setTimeout(() => setHumanInviteCopied(false), 2000);
+                    }}
+                  >
+                    {humanInviteCopied ? "Copied!" : "Copy Link"}
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    Expires in 24 hours
+                  </span>
+                </div>
+              </div>
+              <div className="border-t border-border pt-3">
+                <label className="text-xs text-muted-foreground mb-1 block">Send invite via email</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="email"
+                    placeholder="colleague@example.com"
+                    value={inviteEmail}
+                    onChange={(e) => {
+                      setInviteEmail(e.target.value);
+                      setInviteEmailSent(false);
+                      setInviteEmailError(null);
+                    }}
+                    className="flex-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none"
+                  />
+                  <Button
+                    size="sm"
+                    disabled={
+                      !inviteEmail.trim() ||
+                      sendInviteEmailMutation.isPending ||
+                      inviteEmailSent
+                    }
+                    onClick={() => sendInviteEmailMutation.mutate()}
+                  >
+                    {inviteEmailSent
+                      ? "Sent!"
+                      : sendInviteEmailMutation.isPending
+                        ? "Sending..."
+                        : "Send Invite Email"}
+                  </Button>
+                </div>
+                {inviteEmailError && (
+                  <p className="mt-1 text-xs text-destructive">{inviteEmailError}</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Members */}
+      <MembersSection companyId={selectedCompanyId!} />
 
       {/* Danger Zone */}
       <div className="space-y-4">

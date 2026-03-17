@@ -93,6 +93,10 @@ function buildSourceConfig(): PaperclipConfig {
         keyFilePath: "/tmp/main/secrets/master.key",
       },
     },
+    email: {
+      provider: "none",
+      fromAddress: "Paperclip <noreply@paperclip.dev>",
+    },
   };
 }
 

@@ -19,16 +19,18 @@ import {
   companies,
   companyMemberships,
   instanceUserRoles,
+  principalPermissionGrants,
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
-import { heartbeatService, reconcilePersistedRuntimeServicesOnStartup } from "./services/index.js";
+import { heartbeatService, reconcilePersistedRuntimeServicesOnStartup, createEmailService } from "./services/index.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
 import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
+import { ROLE_PRESETS } from "@paperclipai/shared";
 
 type BetterAuthSessionUser = {
   id: string;
@@ -224,6 +226,17 @@ export async function startServer(): Promise<StartedServer> {
         status: "active",
         membershipRole: "owner",
       });
+      const ownerGrants = ROLE_PRESETS.owner.map((k) => ({
+        companyId: company.id,
+        principalType: "user" as const,
+        principalId: LOCAL_BOARD_USER_ID,
+        permissionKey: k,
+        scope: null,
+        grantedByUserId: null,
+        createdAt: now,
+        updatedAt: now,
+      }));
+      await db.insert(principalPermissionGrants).values(ownerGrants).onConflictDoNothing();
     }
   }
   
@@ -462,6 +475,11 @@ export async function startServer(): Promise<StartedServer> {
   const listenPort = await detectPort(config.port);
   const uiMode = config.uiDevMiddleware ? "vite-dev" : config.serveUi ? "static" : "none";
   const storageService = createStorageServiceFromConfig(config);
+  const emailService = createEmailService({
+    provider: config.emailProvider,
+    resendApiKey: config.emailResendApiKey,
+    fromAddress: config.emailFromAddress,
+  });
   const app = await createApp(db as any, {
     uiMode,
     serverPort: listenPort,
@@ -472,10 +490,11 @@ export async function startServer(): Promise<StartedServer> {
     bindHost: config.host,
     authReady,
     companyDeletionEnabled: config.companyDeletionEnabled,
+    emailService,
     betterAuthHandler,
     resolveSession,
   });
-  const server = createServer(app as unknown as Parameters<typeof createServer>[0]);
+  const server = createServer(app);
   
   if (listenPort !== config.port) {
     logger.warn(`Requested port is busy; using next free port (requestedPort=${config.port}, selectedPort=${listenPort})`);

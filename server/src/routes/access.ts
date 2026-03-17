@@ -25,7 +25,8 @@ import {
   listJoinRequestsQuerySchema,
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
-  PERMISSION_KEYS
+  PERMISSION_KEYS,
+  HUMAN_INVITE_TTL_MS
 } from "@paperclipai/shared";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import {
@@ -35,6 +36,9 @@ import {
   unauthorized,
   badRequest
 } from "../errors.js";
+import { readRawConfigFile, writeConfigFile } from "../config-file.js";
+import { createEmailService } from "../services/email.js";
+import type { EmailService } from "../services/email.js";
 import { logger } from "../middleware/logger.js";
 import { validate } from "../middleware/validate.js";
 import {
@@ -73,8 +77,8 @@ function createClaimSecret() {
   return `pcp_claim_${randomBytes(24).toString("hex")}`;
 }
 
-export function companyInviteExpiresAt(nowMs: number = Date.now()) {
-  return new Date(nowMs + COMPANY_INVITE_TTL_MS);
+export function companyInviteExpiresAt(nowMs: number = Date.now(), ttlMs: number = COMPANY_INVITE_TTL_MS) {
+  return new Date(nowMs + ttlMs);
 }
 
 function tokenHashesMatch(left: string, right: string) {
@@ -1517,12 +1521,12 @@ export function accessRoutes(
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "agent") {
       if (!req.actor.agentId) throw forbidden();
-      const allowed = await access.hasPermission(
+      const allowed = (await access.hasPermission(
         companyId,
         "agent",
         req.actor.agentId,
         permissionKey
-      );
+      )).granted;
       if (!allowed) throw forbidden("Permission denied");
       return;
     }
@@ -1577,7 +1581,10 @@ export function accessRoutes(
         input.defaultsPayload ?? null,
         normalizedAgentMessage
       ),
-      expiresAt: companyInviteExpiresAt(),
+      expiresAt: companyInviteExpiresAt(
+        Date.now(),
+        input.allowedJoinTypes === "human" ? HUMAN_INVITE_TTL_MS : COMPANY_INVITE_TTL_MS,
+      ),
       invitedByUserId: input.req.actor.userId ?? null
     };
 
@@ -1667,10 +1674,12 @@ export function accessRoutes(
       });
 
       const inviteSummary = toInviteSummaryResponse(req, token, created);
+      const baseUrl = requestBaseUrl(req);
+      const inviteUrl = baseUrl ? `${baseUrl}/invite/${token}` : `/invite/${token}`;
       res.status(201).json({
         ...created,
         token,
-        inviteUrl: `/invite/${token}`,
+        inviteUrl,
         onboardingTextPath: inviteSummary.onboardingTextPath,
         onboardingTextUrl: inviteSummary.onboardingTextUrl,
         inviteMessage: inviteSummary.inviteMessage
@@ -1712,14 +1721,79 @@ export function accessRoutes(
       });
 
       const inviteSummary = toInviteSummaryResponse(req, token, created);
+      const baseUrl = requestBaseUrl(req);
+      const inviteUrl = baseUrl ? `${baseUrl}/invite/${token}` : `/invite/${token}`;
       res.status(201).json({
         ...created,
         token,
-        inviteUrl: `/invite/${token}`,
+        inviteUrl,
         onboardingTextPath: inviteSummary.onboardingTextPath,
         onboardingTextUrl: inviteSummary.onboardingTextUrl,
         inviteMessage: inviteSummary.inviteMessage
       });
+    }
+  );
+
+  router.post(
+    "/companies/:companyId/invites/:inviteId/send-email",
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyPermission(req, companyId, "users:invite");
+
+      const inviteId = req.params.inviteId as string;
+      const toEmail = typeof req.body.email === "string" ? req.body.email.trim() : "";
+      if (!toEmail) throw badRequest("Email address is required");
+
+      const token = typeof req.body.token === "string" ? req.body.token.trim() : "";
+      if (!token) throw badRequest("Invite token is required");
+
+      const invite = await db
+        .select()
+        .from(invites)
+        .where(and(eq(invites.id, inviteId), eq(invites.companyId, companyId)))
+        .then((rows) => rows[0] ?? null);
+
+      if (!invite || invite.revokedAt || invite.acceptedAt || inviteExpired(invite)) {
+        throw notFound("Invite not found or expired");
+      }
+
+      if (!tokenHashesMatch(hashToken(token), invite.tokenHash)) {
+        throw badRequest("Token does not match invite");
+      }
+
+      const emailService = req.app.locals.emailService as EmailService | undefined;
+      if (!emailService?.isConfigured()) {
+        throw badRequest("Email service is not configured");
+      }
+
+      const baseUrl = requestBaseUrl(req);
+      const inviteUrl = baseUrl ? `${baseUrl}/invite/${token}` : `/invite/${token}`;
+
+      const { companies } = await import("@paperclipai/db");
+      const company = await db
+        .select({ name: companies.name })
+        .from(companies)
+        .where(eq(companies.id, companyId))
+        .then((rows) => rows[0] ?? null);
+      const companyName = company?.name ?? "Paperclip";
+
+      let inviterName: string | undefined;
+      if (req.actor.userId) {
+        const inviter = await db
+          .select({ name: authUsers.name })
+          .from(authUsers)
+          .where(eq(authUsers.id, req.actor.userId))
+          .then((rows) => rows[0] ?? null);
+        inviterName = inviter?.name ?? undefined;
+      }
+
+      await emailService.sendInviteEmail(toEmail, {
+        inviteUrl,
+        companyName,
+        inviterName,
+      });
+
+      res.json({ sent: true, to: toEmail });
     }
   );
 
@@ -2297,11 +2371,39 @@ export function accessRoutes(
       if (existing.requestType === "human") {
         if (!existing.requestingUserId)
           throw conflict("Join request missing user identity");
+
+        // Extract role from invite defaults instead of hardcoding "member"
+        const defaults = invite.defaultsPayload as Record<string, unknown> | null;
+        const rolePreset = defaults?.rolePreset as string | undefined;
+        const validRoles = ["owner", "admin", "contributor", "viewer"] as const;
+        const membershipRole = rolePreset && (validRoles as readonly string[]).includes(rolePreset)
+          ? rolePreset
+          : "contributor";
+
+        // Enforce hierarchy: approver cannot grant a role equal or higher than their own
+        const actorMembership = req.actor.type === "agent" && req.actor.agentId
+          ? await access.getMembership(companyId, "agent", req.actor.agentId)
+          : req.actor.userId
+            ? await access.getMembership(companyId, "user", req.actor.userId)
+            : null;
+        const isAdmin = req.actor.userId
+          ? await access.isInstanceAdmin(req.actor.userId)
+          : false;
+        if (
+          !isAdmin &&
+          !access.canModifyMember(
+            actorMembership?.membershipRole ?? null,
+            membershipRole,
+          )
+        ) {
+          throw forbidden("Cannot approve invite granting equal or higher role");
+        }
+
         await access.ensureMembership(
           companyId,
           "user",
           existing.requestingUserId,
-          "member",
+          membershipRole,
           "active"
         );
         const grants = grantsFromDefaults(
@@ -2354,11 +2456,38 @@ export function accessRoutes(
           metadata: null
         });
         createdAgentId = created.id;
+        // Use canonical role from invite defaults (defaulting to "contributor")
+        const agentDefaults = invite.defaultsPayload as Record<string, unknown> | null;
+        const agentRolePreset = agentDefaults?.rolePreset as string | undefined;
+        const agentValidRoles = ["owner", "admin", "contributor", "viewer"] as const;
+        const agentMembershipRole = agentRolePreset && (agentValidRoles as readonly string[]).includes(agentRolePreset)
+          ? agentRolePreset
+          : "contributor";
+
+        // Enforce hierarchy: approver cannot grant a role equal or higher than their own
+        const agentActorMembership = req.actor.type === "agent" && req.actor.agentId
+          ? await access.getMembership(companyId, "agent", req.actor.agentId)
+          : req.actor.userId
+            ? await access.getMembership(companyId, "user", req.actor.userId)
+            : null;
+        const agentIsAdmin = req.actor.userId
+          ? await access.isInstanceAdmin(req.actor.userId)
+          : false;
+        if (
+          !agentIsAdmin &&
+          !access.canModifyMember(
+            agentActorMembership?.membershipRole ?? null,
+            agentMembershipRole,
+          )
+        ) {
+          throw forbidden("Cannot approve invite granting equal or higher role");
+        }
+
         await access.ensureMembership(
           companyId,
           "agent",
           created.id,
-          "member",
+          agentMembershipRole,
           "active"
         );
         const grants = grantsFromDefaults(
@@ -2541,6 +2670,43 @@ export function accessRoutes(
     }
   );
 
+  router.get("/companies/:companyId/my-permissions", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    if (req.actor.type === "agent" && req.actor.agentId) {
+      const result = await access.getMyPermissions(companyId, "agent", req.actor.agentId);
+      res.json(result);
+      return;
+    }
+
+    if (req.actor.type === "board") {
+      if (isLocalImplicit(req)) {
+        res.json({ membershipRole: "owner", permissions: [...PERMISSION_KEYS] });
+        return;
+      }
+      if (req.actor.userId) {
+        const isAdmin = await access.isInstanceAdmin(req.actor.userId);
+        if (isAdmin) {
+          res.json({ membershipRole: "owner", permissions: [...PERMISSION_KEYS] });
+          return;
+        }
+        const result = await access.getMyPermissions(companyId, "user", req.actor.userId);
+        res.json(result);
+        return;
+      }
+    }
+
+    res.json({ membershipRole: null, permissions: [] });
+  });
+
+  router.get("/companies/:companyId/people", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const people = await access.listPeople(companyId);
+    res.json(people);
+  });
+
   router.get("/companies/:companyId/members", async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCompanyPermission(req, companyId, "users:manage_permissions");
@@ -2555,16 +2721,104 @@ export function accessRoutes(
       const companyId = req.params.companyId as string;
       const memberId = req.params.memberId as string;
       await assertCompanyPermission(req, companyId, "users:manage_permissions");
+
+      const actorMembership = req.actor.type === "agent" && req.actor.agentId
+        ? await access.getMembership(companyId, "agent", req.actor.agentId)
+        : req.actor.userId
+          ? await access.getMembership(companyId, "user", req.actor.userId)
+          : null;
+      const targetMembers = await access.listMembers(companyId);
+      const targetMember = targetMembers.find((m) => m.id === memberId);
+      if (!targetMember) throw notFound("Member not found");
+
+      const isAdmin = req.actor.userId ? await access.isInstanceAdmin(req.actor.userId) : false;
+      if (!isAdmin && !access.canModifyMember(actorMembership?.membershipRole ?? null, targetMember.membershipRole)) {
+        throw forbidden("Cannot modify member with equal or higher role");
+      }
+
       const updated = await access.setMemberPermissions(
         companyId,
         memberId,
         req.body.grants ?? [],
-        req.actor.userId ?? null
+        req.actor.userId ?? null,
+        req.body.membershipRole
       );
       if (!updated) throw notFound("Member not found");
       res.json(updated);
     }
   );
+
+  router.delete("/companies/:companyId/members/:memberId", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const memberId = req.params.memberId as string;
+    await assertCompanyPermission(req, companyId, "users:manage_permissions");
+
+    const actorMembership = req.actor.type === "agent" && req.actor.agentId
+      ? await access.getMembership(companyId, "agent", req.actor.agentId)
+      : req.actor.userId
+        ? await access.getMembership(companyId, "user", req.actor.userId)
+        : null;
+    const targetMembers = await access.listMembers(companyId);
+    const targetMember = targetMembers.find((m) => m.id === memberId);
+    if (!targetMember) throw notFound("Member not found");
+
+    const isAdmin = req.actor.userId ? await access.isInstanceAdmin(req.actor.userId) : false;
+    if (!isAdmin && !access.canModifyMember(actorMembership?.membershipRole ?? null, targetMember.membershipRole)) {
+      throw forbidden("Cannot remove member with equal or higher role");
+    }
+
+    const removed = await access.removeMember(companyId, memberId, req.actor.userId ?? "system");
+    if (!removed) throw notFound("Member not found");
+    res.status(204).send();
+  });
+
+  router.post("/companies/:companyId/members/:memberId/suspend", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const memberId = req.params.memberId as string;
+    await assertCompanyPermission(req, companyId, "users:manage_permissions");
+
+    const actorMembership = req.actor.type === "agent" && req.actor.agentId
+      ? await access.getMembership(companyId, "agent", req.actor.agentId)
+      : req.actor.userId
+        ? await access.getMembership(companyId, "user", req.actor.userId)
+        : null;
+    const targetMembers = await access.listMembers(companyId);
+    const targetMember = targetMembers.find((m) => m.id === memberId);
+    if (!targetMember) throw notFound("Member not found");
+
+    const isAdmin = req.actor.userId ? await access.isInstanceAdmin(req.actor.userId) : false;
+    if (!isAdmin && !access.canModifyMember(actorMembership?.membershipRole ?? null, targetMember.membershipRole)) {
+      throw forbidden("Cannot suspend member with equal or higher role");
+    }
+
+    const suspended = await access.suspendMember(companyId, memberId, req.actor.userId ?? "system");
+    if (!suspended) throw notFound("Member not found");
+    res.json(suspended);
+  });
+
+  router.post("/companies/:companyId/members/:memberId/unsuspend", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const memberId = req.params.memberId as string;
+    await assertCompanyPermission(req, companyId, "users:manage_permissions");
+
+    const actorMembership = req.actor.type === "agent" && req.actor.agentId
+      ? await access.getMembership(companyId, "agent", req.actor.agentId)
+      : req.actor.userId
+        ? await access.getMembership(companyId, "user", req.actor.userId)
+        : null;
+    const targetMembers = await access.listMembers(companyId);
+    const targetMember = targetMembers.find((m) => m.id === memberId);
+    if (!targetMember) throw notFound("Member not found");
+
+    const isAdmin = req.actor.userId ? await access.isInstanceAdmin(req.actor.userId) : false;
+    if (!isAdmin && !access.canModifyMember(actorMembership?.membershipRole ?? null, targetMember.membershipRole)) {
+      throw forbidden("Cannot unsuspend member with equal or higher role");
+    }
+
+    const unsuspended = await access.unsuspendMember(companyId, memberId, req.actor.userId ?? "system");
+    if (!unsuspended) throw notFound("Member not found");
+    res.json(unsuspended);
+  });
 
   router.post(
     "/admin/users/:userId/promote-instance-admin",
@@ -2607,6 +2861,50 @@ export function accessRoutes(
       res.json(memberships);
     }
   );
+
+  router.patch("/admin/config/email", async (req, res) => {
+    await assertInstanceAdmin(req);
+    const { provider, resendApiKey, fromAddress } = req.body as {
+      provider?: "resend" | "none";
+      resendApiKey?: string;
+      fromAddress?: string;
+    };
+
+    const rawConfig = readRawConfigFile() ?? {};
+    const existingEmail =
+      typeof rawConfig.email === "object" && rawConfig.email !== null
+        ? { ...(rawConfig.email as Record<string, unknown>) }
+        : {};
+
+    if (provider !== undefined) existingEmail.provider = provider;
+    if (resendApiKey !== undefined) existingEmail.resendApiKey = resendApiKey;
+    if (fromAddress !== undefined) existingEmail.fromAddress = fromAddress;
+
+    rawConfig.email = existingEmail;
+    writeConfigFile(rawConfig);
+
+    // Reinitialize the email service on the running app
+    const newEmailService = createEmailService({
+      provider: (existingEmail.provider as "resend" | "none") ?? "none",
+      resendApiKey: existingEmail.resendApiKey as string | undefined,
+      fromAddress: (existingEmail.fromAddress as string) ?? "Paperclip <noreply@paperclip.dev>",
+    });
+    req.app.locals.emailService = newEmailService;
+
+    res.json({
+      provider: existingEmail.provider ?? "none",
+      fromAddress: existingEmail.fromAddress ?? "Paperclip <noreply@paperclip.dev>",
+      configured: newEmailService.isConfigured(),
+    });
+  });
+
+  router.get("/admin/config/email", async (req, res) => {
+    await assertInstanceAdmin(req);
+    const emailService = req.app.locals.emailService as EmailService | undefined;
+    res.json({
+      configured: emailService?.isConfigured() ?? false,
+    });
+  });
 
   return router;
 }

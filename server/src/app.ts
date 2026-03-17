@@ -2,9 +2,11 @@ import express, { Router, type Request as ExpressRequest } from "express";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { Db } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
+import { type Db, authUsers } from "@paperclipai/db";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import type { StorageService } from "./storage/types.js";
+import type { EmailService } from "./services/email.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
@@ -24,6 +26,7 @@ import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { llmRoutes } from "./routes/llms.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
+import { userRoutes } from "./routes/users.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { applyUiBranding } from "./ui-branding.js";
@@ -58,6 +61,7 @@ export async function createApp(
     bindHost: string;
     authReady: boolean;
     companyDeletionEnabled: boolean;
+    emailService?: EmailService;
     instanceId?: string;
     hostVersion?: string;
     localPluginDir?: string;
@@ -72,6 +76,9 @@ export async function createApp(
       (req as unknown as { rawBody: Buffer }).rawBody = buf;
     },
   }));
+  if (opts.emailService) {
+    app.locals.emailService = opts.emailService;
+  }
   app.use(httpLogger);
   const privateHostnameGateEnabled =
     opts.deploymentMode === "authenticated" && opts.deploymentExposure === "private";
@@ -92,21 +99,30 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
-  app.get("/api/auth/get-session", (req, res) => {
+  app.get("/api/auth/get-session", async (req, res) => {
     if (req.actor.type !== "board" || !req.actor.userId) {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
+    const userId = req.actor.userId;
+    let name: string | null = req.actor.source === "local_implicit" ? "Local Board" : null;
+    let email: string | null = null;
+    let image: string | null = null;
+    if (req.actor.source !== "local_implicit") {
+      const [row] = await db.select({ name: authUsers.name, email: authUsers.email, image: authUsers.image })
+        .from(authUsers).where(eq(authUsers.id, userId)).limit(1);
+      if (row) {
+        name = row.name;
+        email = row.email;
+        image = row.image ?? null;
+      }
+    }
     res.json({
       session: {
-        id: `paperclip:${req.actor.source}:${req.actor.userId}`,
-        userId: req.actor.userId,
+        id: `paperclip:${req.actor.source}:${userId}`,
+        userId,
       },
-      user: {
-        id: req.actor.userId,
-        email: null,
-        name: req.actor.source === "local_implicit" ? "Local Board" : null,
-      },
+      user: { id: userId, email, name, image },
     });
   });
   if (opts.betterAuthHandler) {
@@ -126,7 +142,7 @@ export async function createApp(
       companyDeletionEnabled: opts.companyDeletionEnabled,
     }),
   );
-  api.use("/companies", companyRoutes(db));
+  api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(agentRoutes(db));
   api.use(assetRoutes(db, opts.storageService));
   api.use(projectRoutes(db));
@@ -209,6 +225,7 @@ export async function createApp(
       allowedHostnames: opts.allowedHostnames,
     }),
   );
+  api.use(userRoutes(db, opts.storageService));
   app.use("/api", api);
   app.use("/api", (_req, res) => {
     res.status(404).json({ error: "API route not found" });
@@ -245,11 +262,17 @@ export async function createApp(
       appType: "custom",
       server: {
         middlewareMode: true,
-        hmr: {
-          host: opts.bindHost,
-          port: hmrPort,
-          clientPort: hmrPort,
-        },
+        hmr: (() => {
+          // When behind a TLS reverse proxy (domain name in allowedHostnames),
+          // route HMR through the proxy via a dedicated path.
+          // Otherwise use upstream defaults (direct port 13100).
+          const proxyHost = privateHostnameGateEnabled
+            ? Array.from(privateHostnameAllowSet).find(h => /^[a-z].*\.[a-z]/i.test(h))
+            : null;
+          return proxyHost
+            ? { port: hmrPort, clientPort: 443, path: "/__vite_hmr", protocol: "wss" as const }
+            : { port: hmrPort, clientPort: hmrPort };
+        })(),
         allowedHosts: privateHostnameGateEnabled ? Array.from(privateHostnameAllowSet) : undefined,
       },
     });

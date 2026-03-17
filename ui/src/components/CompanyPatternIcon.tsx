@@ -12,6 +12,7 @@ interface CompanyPatternIconProps {
   companyName: string;
   logoUrl?: string | null;
   brandColor?: string | null;
+  imageUrl?: string | null;
   className?: string;
 }
 
@@ -164,18 +165,37 @@ export function CompanyPatternIcon({
   companyName,
   logoUrl,
   brandColor,
+  imageUrl,
   className,
 }: CompanyPatternIconProps) {
   const initial = companyName.trim().charAt(0).toUpperCase() || "?";
   const [imageError, setImageError] = useState(false);
-  const logo = !imageError && typeof logoUrl === "string" && logoUrl.trim().length > 0 ? logoUrl : null;
+  const effectiveLogo = logoUrl || imageUrl || null;
+  const logo = !imageError && typeof effectiveLogo === "string" && effectiveLogo.trim().length > 0 ? effectiveLogo : null;
   useEffect(() => {
     setImageError(false);
-  }, [logoUrl]);
+  }, [effectiveLogo]);
   const patternDataUrl = useMemo(
-    () => makeCompanyPatternDataUrl(companyName.trim().toLowerCase(), brandColor),
-    [companyName, brandColor],
+    () => (logo ? "" : makeCompanyPatternDataUrl(companyName.trim().toLowerCase(), brandColor)),
+    [companyName, brandColor, logo],
   );
+
+  if (imageUrl) {
+    return (
+      <div
+        className={cn(
+          "relative flex items-center justify-center w-11 h-11 overflow-hidden",
+          className,
+        )}
+      >
+        <img
+          src={imageUrl}
+          alt={companyName}
+          className="absolute inset-0 h-full w-full object-cover"
+        />
+      </div>
+    );
+  }
 
   return (
     <div
