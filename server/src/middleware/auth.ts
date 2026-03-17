@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agentApiKeys, agents, companyMemberships, instanceUserRoles } from "@paperclipai/db";
+import { agentApiKeys, agents, companyMemberships, instanceUserRoles, userApiKeys } from "@paperclipai/db";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
@@ -90,6 +90,60 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     if (!key) {
       const claims = verifyLocalAgentJwt(token);
       if (!claims) {
+        // Not an agent key or JWT — try user API key (PAT)
+        const userKey = await db
+          .select()
+          .from(userApiKeys)
+          .where(eq(userApiKeys.keyHash, tokenHash))
+          .then((rows) => rows[0] ?? null);
+
+        if (userKey) {
+          if (userKey.revokedAt) {
+            _res.status(401).json({ error: "API key has been revoked" });
+            return;
+          }
+          if (userKey.expiresAt && userKey.expiresAt < new Date()) {
+            _res.status(401).json({ error: "API key has expired" });
+            return;
+          }
+
+          // Update lastUsedAt async (non-blocking)
+          db.update(userApiKeys)
+            .set({ lastUsedAt: new Date() })
+            .where(eq(userApiKeys.id, userKey.id))
+            .catch((err) => logger.warn({ err }, "Failed to update user API key lastUsedAt"));
+
+          const userId = userKey.userId;
+          const [roleRow, memberships] = await Promise.all([
+            db
+              .select({ id: instanceUserRoles.id })
+              .from(instanceUserRoles)
+              .where(and(eq(instanceUserRoles.userId, userId), eq(instanceUserRoles.role, "instance_admin")))
+              .then((rows) => rows[0] ?? null),
+            db
+              .select({ companyId: companyMemberships.companyId })
+              .from(companyMemberships)
+              .where(
+                and(
+                  eq(companyMemberships.principalType, "user"),
+                  eq(companyMemberships.principalId, userId),
+                  eq(companyMemberships.status, "active"),
+                ),
+              ),
+          ]);
+
+          req.actor = {
+            type: "board",
+            userId,
+            companyIds: memberships.map((row) => row.companyId),
+            isInstanceAdmin: Boolean(roleRow),
+            runId: runIdHeader ?? undefined,
+            source: "user_api_key",
+          };
+          next();
+          return;
+        }
+
         next();
         return;
       }

@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { boardMutationGuard } from "../middleware/board-mutation-guard.js";
 
-function createApp(actorType: "board" | "agent", boardSource: "session" | "local_implicit" = "session") {
+function createApp(actorType: "board" | "agent", boardSource: "session" | "local_implicit" | "user_api_key" = "session") {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -57,6 +57,12 @@ describe("boardMutationGuard", () => {
       .post("/mutate")
       .set("Referer", "http://localhost:3100/issues/abc")
       .send({ ok: true });
+    expect(res.status).toBe(204);
+  });
+
+  it("allows user_api_key board mutations without origin", async () => {
+    const app = createApp("board", "user_api_key");
+    const res = await request(app).post("/mutate").send({ ok: true });
     expect(res.status).toBe(204);
   });
 
