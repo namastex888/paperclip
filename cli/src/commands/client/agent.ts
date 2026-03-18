@@ -420,7 +420,13 @@ export function registerAgentCommands(program: Command): void {
   addCommonClientOptions(
     agent
       .command("create")
-      .description("Create a new agent via the hire flow")
+      .description(
+        "Create a new agent via the hire flow.\n" +
+          "  Examples:\n" +
+          "    paperclipai agent create --name bot --role engineer -C <companyId>\n" +
+          "    paperclipai agent create --name bot --adapter-type claude_local --cwd /path --model opus -C <cid>\n" +
+          "    paperclipai agent create --name bot --role pm --json -C <cid>  # JSON output",
+      )
       .requiredOption("-C, --company-id <id>", "Company ID")
       .requiredOption("--name <name>", "Agent name")
       .option("--role <role>", "Agent role (ceo, cto, engineer, pm, qa, etc.)", "general")
@@ -498,7 +504,13 @@ export function registerAgentCommands(program: Command): void {
   addCommonClientOptions(
     agent
       .command("import")
-      .description("Import an agent from a local folder by reading AGENTS.md frontmatter")
+      .description(
+        "Import an agent from a local folder by reading AGENTS.md frontmatter.\n" +
+          "  Examples:\n" +
+          "    paperclipai agent import ~/agents/my-agent -C <companyId>\n" +
+          "    paperclipai agent import ./agent-folder -C <cid> --dry-run   # preview without creating\n" +
+          "    paperclipai agent import ./agent-folder -C <cid> --setup-keys # create + generate keys",
+      )
       .argument("<path>", "Path to agent folder containing AGENTS.md or SOUL.md")
       .requiredOption("-C, --company-id <id>", "Company ID")
       .option("--name <name>", "Override agent name (default: from frontmatter or folder name)")
@@ -649,8 +661,12 @@ export function registerAgentCommands(program: Command): void {
     agent
       .command("local-cli")
       .description(
-        "Create an agent API key, install local Paperclip skills for Codex/Claude, and print shell exports. " +
-          "If the agent doesn't exist, use --create to create it first.",
+        "Create an agent API key, install local Paperclip skills for Codex/Claude, and print shell exports.\n" +
+          "  If the agent doesn't exist, use --create to create it first.\n" +
+          "  Examples:\n" +
+          "    paperclipai agent local-cli my-agent -C <companyId>                  # existing agent\n" +
+          "    paperclipai agent local-cli new-agent -C <cid> --create --role pm    # create + setup\n" +
+          "    paperclipai agent local-cli my-agent -C <cid> --json                 # JSON output",
       )
       .argument("<agentRef>", "Agent ID or shortname/url-key")
       .requiredOption("-C, --company-id <id>", "Company ID")
