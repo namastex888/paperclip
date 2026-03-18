@@ -266,7 +266,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
               );
               if (updated !== current) {
                 latestValueRef.current = updated;
-                ref.current?.setMarkdown(updated);
+                ref.current?.setMarkdown(updated ?? "");
                 onChange(updated);
                 requestAnimationFrame(() => {
                   ref.current?.focus(undefined, { defaultSelection: "rootEnd" });
@@ -304,7 +304,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
 
   useEffect(() => {
     if (value !== latestValueRef.current) {
-      ref.current?.setMarkdown(value);
+      ref.current?.setMarkdown(value ?? "");
       latestValueRef.current = value;
     }
   }, [value]);
@@ -395,7 +395,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
       const next = applyMention(current, state.query, option);
       if (next !== current) {
         latestValueRef.current = next;
-        ref.current?.setMarkdown(next);
+        ref.current?.setMarkdown(next ?? "");
         onChange(next);
         return true;
       }
@@ -572,7 +572,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorRef, MarkdownEditorProps>
     >
       <MDXEditor
         ref={ref}
-        markdown={value}
+        markdown={value ?? ""}
         placeholder={placeholder}
         onChange={(next) => {
           latestValueRef.current = next;
