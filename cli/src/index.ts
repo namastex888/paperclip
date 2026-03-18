@@ -6,7 +6,7 @@ import { configure } from "./commands/configure.js";
 import { addAllowedHostname } from "./commands/allowed-hostname.js";
 import { heartbeatRun } from "./commands/heartbeat-run.js";
 import { runCommand } from "./commands/run.js";
-import { bootstrapCeoInvite } from "./commands/auth-bootstrap-ceo.js";
+import { bootstrapCeoInvite, claimBootstrapInvite } from "./commands/auth-bootstrap-ceo.js";
 import { dbBackupCommand } from "./commands/db-backup.js";
 import { registerContextCommands } from "./commands/client/context.js";
 import { registerCompanyCommands } from "./commands/client/company.js";
@@ -146,13 +146,25 @@ registerAuthClientCommands(auth);
 
 auth
   .command("bootstrap-ceo")
-  .description("Create a one-time bootstrap invite URL for first instance admin")
+  .description("Create a one-time bootstrap invite URL, or claim one with --claim <token>")
   .option("-c, --config <path>", "Path to config file")
   .option("-d, --data-dir <path>", DATA_DIR_OPTION_HELP)
   .option("--force", "Create new invite even if admin already exists", false)
   .option("--expires-hours <hours>", "Invite expiration window in hours", (value) => Number(value))
   .option("--base-url <url>", "Public base URL used to print invite link")
-  .action(bootstrapCeoInvite);
+  .option("--claim <token>", "Claim a bootstrap invite token to become instance admin")
+  .option("--api-key <token>", "Bearer token (PAT) for authenticated claim")
+  .option("--api-base <url>", "Base URL for the Paperclip API")
+  .option("--context <path>", "Path to CLI context file")
+  .option("--profile <name>", "CLI context profile name")
+  .option("--json", "Output raw JSON")
+  .action(async (opts) => {
+    if (opts.claim) {
+      await claimBootstrapInvite(opts);
+    } else {
+      await bootstrapCeoInvite(opts);
+    }
+  });
 
 program.parseAsync().catch((err) => {
   console.error(err instanceof Error ? err.message : String(err));
